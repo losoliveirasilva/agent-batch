@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Render a batch of prompts and open interactive agents in tmux."""
+
+import argparse
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tomllib
+
+
+PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+AGENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+
+
+def claude_command(command, prompt, session_name=None):
+    # The attached form keeps names starting with "-" from reading as options.
+    name = [f"--name={session_name}"] if session_name is not None else []
+    return [*command, *name, "--", prompt]
+
+
+def codex_command(command, prompt, session_name=None):
+    if session_name is not None:
+        raise ValueError("Codex cannot set the session name from the command line; "
+                         "remove SESSION_NAME and --session-name (in Codex, use /rename)")
+    return [*command, "--", prompt]
+
+
+# Each supported CLI owns its invocation format. Instances only configure
+# which CLI to use and its executable/arguments, never prompt interpolation.
+# Adapters raise ValueError for options their CLI cannot honor.
+AGENT_TYPES = {"claude": claude_command, "codex": codex_command}
+
+
+def load_agents(cli, config_path):
+    agents = {name: {"type": name, "command": [name]} for name in AGENT_TYPES}
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    path = Path(config_path).expanduser() if config_path else config_home / "agent-batch/config.toml"
+    try:
+        with path.open("rb") as source:
+            config = tomllib.load(source)
+    except FileNotFoundError:
+        if config_path:
+            cli.error(f"configuration not found: {path}")
+        return agents, "claude"
+    except (OSError, ValueError) as error:
+        cli.error(f"invalid configuration in {path}: {error}")
+
+    def invalid(message):
+        cli.error(f"invalid configuration in {path}: {message}")
+
+    unknown = config.keys() - {"default_agent", "agents"}
+    if unknown:
+        invalid(f"unknown fields: {', '.join(sorted(unknown))}")
+    instances = config.get("agents", {})
+    if not isinstance(instances, dict):
+        invalid("agents must be a table")
+    for name, instance in instances.items():
+        if not AGENT_NAME.fullmatch(name):
+            invalid(f"invalid instance name: {name!r}")
+        if not isinstance(instance, dict):
+            invalid(f"agents.{name} must be a table")
+        unknown = instance.keys() - {"type", "command"}
+        if unknown:
+            invalid(f"agents.{name}: unknown fields: {', '.join(sorted(unknown))}")
+        agent_type = instance.get("type")
+        if not isinstance(agent_type, str) or agent_type not in AGENT_TYPES:
+            invalid(f"agents.{name}.type must be one of the types: {', '.join(AGENT_TYPES)}; "
+                    "new types require support in the code")
+        command = instance.get("command", [name])
+        if (not isinstance(command, list) or not command
+                or any(not isinstance(part, str) or "\0" in part for part in command)
+                or not command[0].strip() or command[0].startswith("-")):
+            invalid(f"agents.{name}.command must be a list of arguments, "
+                    'for example: ["claude-work"]')
+        agents[name] = {"type": agent_type, "command": command}
+    default = config.get("default_agent", "claude")
+    if not isinstance(default, str) or default not in agents:
+        invalid("default_agent must name an available instance")
+    return agents, default
+
+
+def parser():
+    cli = argparse.ArgumentParser(
+        description="Run a batch of prompts in tmux windows or panes.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  agent-batch 'Review {{PR_URL}} ({{type}})' \\
+    --item PR_URL=https://github.com/org/repo/pull/123 TYPE=backend TITLE='PR 123' \\
+    --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
+
+  agent-batch --agent codex --template review.txt --path ~/projects/app \\
+    --layout pane --pane-layout tiled --prefix review \\
+    --item PR_URL=https://github.com/org/repo/pull/123 TYPE=backend \\
+    --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
+
+  agent-batch 'Review {{PR_URL}}' --title 'PR {{PR}}' --session-name 'review {{PR}}' \\
+    --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \\
+    --item PR=124 PR_URL=https://github.com/org/repo/pull/124 SESSION_NAME=urgent
+
+Each --item starts one run. Keys are case-insensitive.
+TITLE names the window/pane and can also appear in the template.
+Without TITLE, --title is used; without both, names are PREFIX-1, PREFIX-2, etc.
+SESSION_NAME (or --session-name) names the agent session; Codex does not support it.
+--title and --session-name accept {{KEY}} with each item's variables.
+Without --item, the prompt runs once (with no variables).
+Inside tmux, the current session is used; outside, a new session is created and attached.
+--path sets the directory for all agents; --template is relative to the caller.
+Agents run in your interactive shell ($SHELL), including functions and aliases.
+When an agent exits, the shell stays open so you can review the output.
+Built-in instances: claude and codex. Customize them in
+$XDG_CONFIG_HOME/agent-batch/config.toml (or ~/.config/agent-batch/config.toml).
+Use --list-agents to list the available instances.
+""",
+    )
+    cli.add_argument("prompt", nargs="?", help="text with {{KEY}} markers")
+    cli.add_argument("--template", metavar="FILE", help="UTF-8 template file, instead of the text")
+    cli.add_argument("--agent", metavar="NAME", help="agent instance (default: config or claude)")
+    cli.add_argument("--config", metavar="FILE", help="alternative TOML configuration file")
+    cli.add_argument("--list-agents", action="store_true", help="list instances, types, and commands")
+    cli.add_argument("--item", action="append", nargs="+", metavar="KEY=VALUE",
+                     help="variables for one run; repeat for each item")
+    cli.add_argument("--path", default=".", metavar="DIRECTORY",
+                     help="agents' working directory (default: current directory)")
+    cli.add_argument("--layout", choices=("window", "pane"), default="window",
+                     help="windows, or panes in a new window (default: window)")
+    cli.add_argument("--pane-layout", choices=("even-horizontal", "even-vertical", "tiled"),
+                     default="even-horizontal",
+                     help="side by side, stacked, or grid (default: even-horizontal)")
+    cli.add_argument("--prefix", default="task", help="name prefix (default: task)")
+    cli.add_argument("--title", metavar="TEMPLATE",
+                     help="window/pane name with {{KEY}}; an item's TITLE takes precedence")
+    cli.add_argument("--session-name", metavar="TEMPLATE",
+                     help="agent session name with {{KEY}}; an item's SESSION_NAME takes precedence")
+    cli.add_argument("--dry-run", action="store_true", help="show names and prompts without running")
+    cli.add_argument("--detach", action="store_true", help="create without attaching or moving tmux focus")
+    return cli
+
+
+def valid_title(title):
+    return bool(title.strip()) and not any(ord(c) < 32 or ord(c) == 127 for c in title)
+
+
+def render(template, values):
+    # A single pass preserves literal {{markers}} in user-provided values.
+    return PLACEHOLDER.sub(lambda match: values[match.group(1).upper()], template)
+
+
+def prepare(cli, args):
+    if (args.prompt is None) == (args.template is None):
+        cli.error("provide a prompt OR --template FILE")
+    try:
+        template = (Path(args.template).expanduser().read_text(encoding="utf-8")
+                    if args.template is not None else args.prompt)
+        directory = Path(args.path).expanduser().resolve(strict=True)
+    except (OSError, UnicodeError, ValueError) as error:
+        cli.error(str(error))
+    if not directory.is_dir():
+        cli.error(f"not a directory: {directory}")
+    if not template.strip():
+        cli.error("the template cannot be empty")
+    if not valid_title(args.prefix):
+        cli.error("--prefix must be a non-empty name without control characters")
+
+    jobs = []
+    for number, assignments in enumerate(args.item or [[]], 1):
+        values = {}
+        for assignment in assignments:
+            key, separator, value = assignment.partition("=")
+            if not separator or not KEY.fullmatch(key):
+                cli.error(f"item {number}: expected KEY=VALUE, got {assignment!r}")
+            key = key.upper()
+            if key in values:
+                cli.error(f"item {number}: duplicate key {key}; use --item for another item")
+            values[key] = value
+        # Item values are literal; the name templates apply only when they are absent.
+        patterns = {key: pattern for key, pattern in (("TITLE", args.title),
+                                                       ("SESSION_NAME", args.session_name))
+                    if pattern is not None and key not in values}
+        missing = sorted({match.group(1).upper()
+                          for text in (template, *patterns.values())
+                          for match in PLACEHOLDER.finditer(text)} - values.keys())
+        if missing:
+            cli.error(f"item {number}: missing keys {', '.join(missing)}")
+        prompt = render(template, values)
+        names = values | {key: render(pattern, values) for key, pattern in patterns.items()}
+        title = names.get("TITLE", f"{args.prefix}-{number}")
+        session_name = names.get("SESSION_NAME")
+        if not valid_title(title):
+            cli.error(f"item {number}: the title (TITLE or --title) must be non-empty, "
+                      "without control characters")
+        if session_name is not None and not valid_title(session_name):
+            cli.error(f"item {number}: the session name (SESSION_NAME or --session-name) "
+                      "must be non-empty, without control characters")
+        if "\0" in prompt:
+            cli.error(f"item {number}: the prompt cannot contain NUL bytes")
+        jobs.append((title, session_name, prompt))
+    return str(directory), jobs
+
+
+def tmux(*args):
+    result = subprocess.run(["tmux", *args], text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(f"tmux {args[0]}: {result.stderr.strip() or 'failed'}")
+    return result.stdout.strip()
+
+
+def launch(args, directory, jobs):
+    if not shutil.which("tmux"):
+        raise RuntimeError("tmux not found in PATH")
+    shell = os.environ.get("SHELL") or "/bin/bash"
+    if Path(shell).name not in ("bash", "zsh", "sh", "dash", "ksh"):
+        raise RuntimeError("set $SHELL to a POSIX-compatible shell (for example, zsh or bash)")
+    inside = bool(os.environ.get("TMUX"))
+    if not inside and not args.detach and not sys.stdin.isatty():
+        raise RuntimeError("a terminal is required to attach to tmux; use --detach or --dry-run")
+
+    session = None
+    first_window = None
+    panes = []
+    # Keep new panes alive without loading the user's shell until the entire
+    # layout is ready. Only these placeholder processes are respawned.
+    try:
+        if inside:
+            target = ["-t", os.environ["TMUX_PANE"]] if os.environ.get("TMUX_PANE") else []
+            session = tmux("display-message", "-p", *target, "#{session_id}")
+        for index, (title, _) in enumerate(jobs):
+            window_name = args.prefix if args.layout == "pane" else title
+            common = ["-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-c", directory]
+            if index == 0 and not inside:
+                width, height = shutil.get_terminal_size((160, 48))
+                identifiers = tmux("new-session", *common, "-x", str(width), "-y", str(height),
+                                   "-n", window_name, "sleep", "2147483647")
+            elif args.layout == "pane" and index:
+                direction = "-v" if args.pane_layout == "even-vertical" else "-h"
+                identifiers = tmux("split-window", *common, direction, "-t", panes[-1],
+                                   "sleep", "2147483647")
+            else:
+                identifiers = tmux("new-window", *common, "-t", f"{session}:", "-n", window_name,
+                                   "sleep", "2147483647")
+            session, window, pane = identifiers.split()
+            first_window = first_window or window
+            panes.append(pane)
+            tmux("set-option", "-w", "-t", window, "automatic-rename", "off")
+            tmux("set-option", "-w", "-t", window, "allow-rename", "off")
+            tmux("select-pane", "-t", pane, "-T", title)
+            if args.layout == "pane":
+                # Keep the label stable even if an agent changes its terminal title.
+                tmux("set-option", "-p", "-t", pane, "@bulk_title", title)
+                tmux("set-option", "-w", "-t", window, "pane-border-status", "top")
+                tmux("set-option", "-w", "-t", window, "pane-border-format",
+                     " #{pane_index}: #{@bulk_title} ")
+                tmux("select-layout", "-t", window, args.pane_layout)
+    except RuntimeError:
+        if first_window:
+            print(f"The batch was not started. Empty panes were kept in session {session}.",
+                  file=sys.stderr)
+        raise
+
+    for pane, (_, invocation) in zip(panes, jobs):
+        # Interactive startup loads the user's shell functions and aliases.
+        # Pass the prompt as one quoted argument, never as tmux keystrokes.
+        command =(f"cd -- {shlex.quote(directory)} && {shlex.join(invocation)}; "
+                   f"exec {shlex.quote(shell)} -i")
+        tmux("respawn-pane", "-k", "-t", pane, "-c", directory, shell, "-ic", command)
+    tmux("select-pane", "-t", panes[0])
+    if args.detach:
+        print(f"{len(jobs)} run(s) created. Session: {session}, window: {first_window}.")
+        print(f"To attach: tmux attach-session -t {shlex.quote(session)}")
+    elif inside:
+        tmux("select-window", "-t", first_window)
+    else:
+        tmux("select-window", "-t", first_window)
+        result = subprocess.run(["tmux", "attach-session", "-t", session])
+        if result.returncode:
+            raise RuntimeError(f"could not attach to session {session}; it is still available")
+
+
+def main():
+    cli = parser()
+    args = cli.parse_args()
+    agents, default = load_agents(cli, args.config)
+    if args.list_agents:
+        for name, spec in agents.items():
+            suffix = " (default)" if name == default else ""
+            print(f"{name}{suffix}: type={spec['type']}, command={shlex.join(spec['command'])}")
+        return 0
+    args.agent = args.agent if args.agent is not None else default
+    if args.agent not in agents:
+        cli.error(f"unknown instance: {args.agent!r}; available: {', '.join(agents)}")
+    spec = agents[args.agent]
+    directory, jobs = prepare(cli, args)
+    try:
+        invocations = [AGENT_TYPES[spec["type"]](spec["command"], prompt, session_name)
+                       for _, session_name, prompt in jobs]
+    except ValueError as error:
+        cli.error(f"instance {args.agent}: {error}")
+    if args.dry_run:
+        print(f"Agent: {args.agent} (type: {spec['type']})\n"
+              f"Base command: {shlex.join(spec['command'])}\n"
+              f"Directory: {directory}\nLayout: {args.layout}")
+        for number, (title, session_name, prompt) in enumerate(jobs, 1):
+            session = f" · session: {session_name}" if session_name is not None else ""
+            print(f"\n[{number}] {title}{session}\n{prompt}")
+        return 0
+    try:
+        launch(args, directory, [(title, invocation)
+                                 for (title, _, _), invocation in zip(jobs, invocations)])
+    except (OSError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

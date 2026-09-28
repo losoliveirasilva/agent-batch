@@ -1,0 +1,11 @@
+# Optional. Without configuration, claude and codex are already available.
+# Install at ~/.config/agent-batch/config.toml or use --config FILE.
+default_agent = "claude-work"
+
+[agents.claude-work]
+type = "claude"
+command = ["claude-work"] # Executable, function, or alias from the interactive shell.
+
+[agents.codex-work]
+type = "codex"
+command = ["codex", "--profile", "work"]
