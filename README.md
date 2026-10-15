@@ -24,13 +24,13 @@ agent-batch 'Review {{PR_URL}} with a focus on {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents.
+Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `AGENT` runs one item with another agent instance (see [Agent per item](#agent-per-item)). `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents.
 
 ### Interactive mode and prompt history
 
-Run `agent-batch` without arguments in a terminal to select a saved prompt or create one. You can also start with a specific prompt or file: `agent-batch -i 'Review {{PR_URL}}'` or `agent-batch -i --template review.txt`. The program asks for each `{{KEY}}` value and previews the rendered prompt. From the same menu, you can add another item, edit the prompt, override that item's window/pane title with `t`, redo the item, or finish and launch the batch. Titles use `--title` or the usual `task-1`, `task-2` defaults unless overridden. `--agent`, `--path`, `--layout`, `--detach`, and `--dry-run` also work in this mode.
+Run `agent-batch` without arguments in a terminal to select a saved prompt or create one. You can also start with a specific prompt or file: `agent-batch -i 'Review {{PR_URL}}'` or `agent-batch -i --template review.txt`. The program asks for each `{{KEY}}` value and previews the rendered prompt. From the same menu, you can add another item, edit the prompt, override that item's window/pane title with `t`, run that item with another agent instance with `g`, redo the item, or finish and launch the batch. Titles use `--title` or the usual `task-1`, `task-2` defaults unless overridden. `--agent`, `--path`, `--layout`, `--detach`, and `--dry-run` also work in this mode.
 
-The agent, path, and layout are shown immediately, without another question. To change them, press `Ctrl-C` and rerun with the indicated options. Choosing `finish and launch` at the last item's preview starts the batch without another confirmation.
+The batch agent, path, and layout are shown immediately, without another question. To change them, press `Ctrl-C` and rerun with the indicated options. Choosing `finish and launch` at the last item's preview starts the batch without another confirmation.
 
 When entering a new prompt in the terminal, finish with a line containing only `.`. At the prompt picker, type `/text` to search history. History stores **templates**, without filled item values, in `~/.config/agent-batch/history.json` (or `$XDG_CONFIG_HOME/agent-batch/history.json`). Traditional command-line runs also add to this history; `--dry-run` does not. The file is outside the repository.
 
@@ -48,9 +48,23 @@ agent-batch 'Review {{PR_URL}}' --title 'PR {{PR}}' --session-name 'review {{PR}
   --item PR=124 PR_URL=https://github.com/org/repo/pull/124 SESSION_NAME=urgent
 ```
 
-Without `TITLE` or `--title`, windows are named `PREFIX-1`, `PREFIX-2`, and so on. Without `SESSION_NAME` or `--session-name`, the agent picks its default session name. Codex does not accept a session name on the command line (only `/rename` inside the session), so a session name with a `codex` instance is rejected before anything starts.
+Without `TITLE` or `--title`, windows are named `PREFIX-1`, `PREFIX-2`, and so on. Without `SESSION_NAME` or `--session-name`, the agent picks its default session name. Codex does not accept a session name on the command line (only `/rename` inside the session), so a session name on an item that uses a `codex` instance is rejected before anything starts.
 
 By default, each run gets its own window (`--layout window`). To use panes in a single window, pass `--layout pane` with `--pane-layout even-horizontal` (side by side), `even-vertical` (stacked), or `tiled` (grid). Inside tmux, the command uses the current session; outside tmux, it creates and attaches to a new session. `--detach` creates the runs without attaching to the session or changing your focus.
+
+### Agent per item
+
+`--agent` (or `default_agent` in the configuration) sets the batch agent. The `AGENT` item key runs only that item with another instance. `{{AGENT}}` always renders the item's instance name in the prompt, `--title`, and `--session-name`, so it is never asked for or reported as missing. This lets each item write to its own file:
+
+```sh
+agent-batch 'Review {{PR_URL}} and write the findings to reviews/{{PR}}-{{AGENT}}.md' \
+  --agent claude --title 'PR {{PR}} ({{AGENT}})' \
+  --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \
+  --item PR=123 PR_URL=https://github.com/org/repo/pull/123 AGENT=codex \
+  --item PR=124 PR_URL=https://github.com/org/repo/pull/124
+```
+
+The first and third items run `claude` and write `reviews/123-claude.md` and `reviews/124-claude.md`; the second runs `codex` and writes `reviews/123-codex.md`. `AGENT` must name an available instance (see `--list-agents`). `--dry-run` marks items whose agent differs from the batch agent with `· agent: NAME`.
 
 ## Agent types and instances
 

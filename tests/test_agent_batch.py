@@ -22,6 +22,7 @@ import uuid
 
 SCRIPT = Path(__file__).resolve().parents[1] / "agent-batch"
 MODULE = runpy.run_path(str(SCRIPT))
+AGENTS = {name: {"type": name, "command": [name]} for name in ("claude", "codex")}
 
 
 class ConfigTests(unittest.TestCase):
@@ -121,32 +122,61 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[1] window 1 · session: session 1\nhello", result.stdout)
 
+    def test_cli_mixes_agents_per_item(self):
+        result = subprocess.run([str(SCRIPT), "notes-{{N}}-{{AGENT}}.md", "--agent", "claude",
+                                 "--dry-run", "--item", "N=1", "--item", "N=2", "AGENT=codex"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Agent: claude (type: claude)", result.stdout)
+        self.assertIn("[1] task-1\nnotes-1-claude.md", result.stdout)
+        self.assertIn("[2] task-2 · agent: codex\nnotes-2-codex.md", result.stdout)
+        result = subprocess.run([str(SCRIPT), "hello", "--dry-run", "--session-name", "s",
+                                 "--item", "AGENT=claude", "--item", "AGENT=codex"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("item 2: instance codex:", result.stderr)
+
 
 class TemplateTests(unittest.TestCase):
     def prepare(self, *arguments):
         cli = MODULE["parser"]()
-        return MODULE["prepare"](cli, cli.parse_args(arguments))
+        args = cli.parse_args(arguments)
+        args.agent = args.agent or "claude"
+        return MODULE["prepare"](cli, args, AGENTS)
 
     def test_multiple_items_case_and_literal_values(self):
         _, jobs = self.prepare("{{ PR_URL }} {{type}} {{TITLE}}", "--prefix", "review",
                                "--item", "PR_URL=a?x=1&y=2", "TYPE={{TITLE}}", "TITLE=one",
                                "--item", "pr_url=b", "type=frontend", "title=two")
-        self.assertEqual(jobs, [("one", None, "a?x=1&y=2 {{TITLE}} one"),
-                                ("two", None, "b frontend two")])
+        self.assertEqual(jobs, [("one", "claude", None, "a?x=1&y=2 {{TITLE}} one"),
+                                ("two", "claude", None, "b frontend two")])
 
     def test_name_templates_render_item_values_and_yield_to_item_keys(self):
         _, jobs = self.prepare("{{PR}}", "--title", "PR {{pr}}", "--session-name",
                                "review {{ PR }} {{TYPE}}",
                                "--item", "PR=1", "TYPE={{PR}}",
                                "--item", "PR=2", "TYPE=api", "TITLE={{PR}}", "SESSION_NAME=own")
-        self.assertEqual(jobs, [("PR 1", "review 1 {{PR}}", "1"),
-                                ("{{PR}}", "own", "2")])
+        self.assertEqual(jobs, [("PR 1", "claude", "review 1 {{PR}}", "1"),
+                                ("{{PR}}", "claude", "own", "2")])
 
     def test_item_session_name_without_templates(self):
         _, jobs = self.prepare("hello", "--item", "SESSION_NAME=-starts with dash",
                                "--item", "TITLE=x")
-        self.assertEqual(jobs, [("task-1", "-starts with dash", "hello"),
-                                ("x", None, "hello")])
+        self.assertEqual(jobs, [("task-1", "claude", "-starts with dash", "hello"),
+                                ("x", "claude", None, "hello")])
+
+    def test_item_agent_overrides_batch_agent_and_renders_everywhere(self):
+        _, jobs = self.prepare("Write notes/{{PR}}-{{ agent }}.md", "--agent", "codex",
+                               "--title", "PR {{PR}} ({{AGENT}})",
+                               "--session-name", "{{AGENT}} review",
+                               "--item", "PR=1", "agent=claude",
+                               "--item", "PR=2", "AGENT=codex", "SESSION_NAME=own",
+                               "--item", "PR=3", "TITLE={{AGENT}}")
+        self.assertEqual(jobs, [("PR 1 (claude)", "claude", "claude review",
+                                 "Write notes/1-claude.md"),
+                                ("PR 2 (codex)", "codex", "own", "Write notes/2-codex.md"),
+                                ("{{AGENT}}", "codex", "codex review",
+                                 "Write notes/3-codex.md")])
 
     def test_template_file_and_default_titles(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -156,8 +186,8 @@ class TemplateTests(unittest.TestCase):
                                       "--prefix", "review", "--item", "URL=a", "TYPE=",
                                       "--item", "URL=b", "TYPE=backend")
             self.assertEqual(path, directory)
-            self.assertEqual(jobs, [("review-1", None, "Revise a\nTipo: \n"),
-                                    ("review-2", None, "Revise b\nTipo: backend\n")])
+            self.assertEqual(jobs, [("review-1", "claude", None, "Revise a\nTipo: \n"),
+                                    ("review-2", "claude", None, "Revise b\nTipo: backend\n")])
 
     def test_validation_rejects_entire_batch(self):
         cases = [
@@ -172,6 +202,9 @@ class TemplateTests(unittest.TestCase):
             ("hello", "--title", "{{EMPTY}}", "--item", "EMPTY="),
             ("hello", "--title", "PR {{PR}}", "--item", "PR=1", "--item", "SESSION_NAME=two"),
             ("hello", "--session-name", "{{MISSING}}"),
+            ("hello", "--item", "AGENT=unknown"),
+            ("hello", "--item", "AGENT="),
+            ("hello", "--agent", "unknown"),
             ("hello", "--path", "/a-directory-that-does-not-exist"),
             ("hello", "--template", "other.txt"),
             (" ",),
@@ -214,10 +247,10 @@ class InteractiveTests(unittest.TestCase):
                 patch.dict(MODULE["interactive_batch"].__globals__,
                            edit_template=lambda parser, template: updated), \
                 contextlib.redirect_stdout(io.StringIO()):
-            directory, jobs, templates = MODULE["interactive_batch"](cli, args)
+            directory, jobs, templates = MODULE["interactive_batch"](cli, args, AGENTS)
         self.assertEqual(directory, str(Path.cwd()))
-        self.assertEqual(jobs, [("task-1", None, "Revise one"),
-                                ("task-2", None,
+        self.assertEqual(jobs, [("task-1", "claude", None, "Revise one"),
+                                ("task-2", "claude", None,
                                  "Revise four\nIssue: https://tracker.example/issues/4")])
         self.assertEqual(templates, ["Revise {{URL}}", updated])
 
@@ -236,12 +269,35 @@ class InteractiveTests(unittest.TestCase):
                                "Review {{URL}}"])
         with patch("builtins.input", side_effect=["one", "f"]), \
                 contextlib.redirect_stdout(io.StringIO()):
-            _, jobs, _ = MODULE["interactive_batch"](cli, args)
-        self.assertEqual(jobs, [("PR one", None, "Review one")])
+            _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
+        self.assertEqual(jobs, [("PR one", "claude", None, "Review one")])
         with patch("builtins.input", side_effect=["two", "t", "Special review", "f"]), \
                 contextlib.redirect_stdout(io.StringIO()):
-            _, jobs, _ = MODULE["interactive_batch"](cli, args)
-        self.assertEqual(jobs, [("Special review", None, "Review two")])
+            _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
+        self.assertEqual(jobs, [("Special review", "claude", None, "Review two")])
+
+    def test_agent_menu_overrides_only_current_item(self):
+        cli = MODULE["parser"]()
+        args = cli.parse_args(["-i", "--agent", "claude", "--session-name", "s {{AGENT}}",
+                               "Write {{NAME}}-{{AGENT}}.md"])
+        # Unknown names and agents that cannot honor the item's options are re-asked.
+        answers = ["one", "g", "unknown", "codex", "claude", "a",
+                   "two", "a", "three", "g", "", "f"]
+        with patch("builtins.input", side_effect=answers), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
+        self.assertEqual(jobs, [("task-1", "claude", "s claude", "Write one-claude.md"),
+                                ("task-2", "claude", "s claude", "Write two-claude.md"),
+                                ("task-3", "claude", "s claude", "Write three-claude.md")])
+        self.assertIn("Unknown agent", output.getvalue())
+        self.assertIn("Agent codex: Codex cannot set the session name", output.getvalue())
+        args = cli.parse_args(["-i", "--agent", "claude", "Write {{NAME}}-{{AGENT}}.md"])
+        with patch("builtins.input", side_effect=["one", "g", "codex", "a", "two", "f"]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
+        self.assertEqual(jobs, [("task-1", "codex", None, "Write one-codex.md"),
+                                ("task-2", "claude", None, "Write two-claude.md")])
+        self.assertIn("[1] task-1 · agent: codex\nWrite one-codex.md", output.getvalue())
 
     def test_regular_run_saves_template_and_explicit_interactive_needs_tty(self):
         with patch.object(sys, "argv", [str(SCRIPT), "Review {{URL}}", "--item", "URL=one"]), \
@@ -356,6 +412,16 @@ command = ["claude-work"]
         names = self.tmux("list-windows", "-a", "-F", "#{window_name}").splitlines()
         self.assertEqual(names, ["título 01", "task-2", "três"])
         self.assertEqual(self.tmux("show-options", "-wv", "-t", "@0", "automatic-rename"), "off")
+
+    def test_items_run_their_own_agent(self):
+        self.bulk("notes-{{N}}-{{AGENT}}.md", "--detach", "--item", "N=1",
+                  "--item", "N=2", "AGENT=codex", "--item", "N=3", "AGENT=claude")
+        records = self.records(3)
+        self.assertCountEqual([(entry["agent"], entry["profile"], entry["args"])
+                               for entry in records],
+                              [("claude", "work", ["--", "notes-1-claude-work.md"]),
+                               ("codex", None, ["--", "notes-2-codex.md"]),
+                               ("claude", None, ["--", "notes-3-claude.md"])])
 
     def test_panes_layouts_and_exact_prompt_quoting(self):
         sentinel = self.root / "must-not-exist"

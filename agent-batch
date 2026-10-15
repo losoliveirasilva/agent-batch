@@ -151,10 +151,17 @@ def parser():
     --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \\
     --item PR=124 PR_URL=https://github.com/org/repo/pull/124 SESSION_NAME=urgent
 
+  agent-batch 'Review {{PR_URL}}; write the findings to reviews/{{PR}}-{{AGENT}}.md' \\
+    --agent claude --title 'PR {{PR}} ({{AGENT}})' \\
+    --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \\
+    --item PR=123 PR_URL=https://github.com/org/repo/pull/123 AGENT=codex
+
 Each --item starts one run. Keys are case-insensitive.
 TITLE names the window/pane and can also appear in the template.
 Without TITLE, --title is used; without both, names are PREFIX-1, PREFIX-2, etc.
 SESSION_NAME (or --session-name) names the agent session; Codex does not support it.
+AGENT runs one item with another instance (default: --agent or default_agent).
+{{AGENT}} always renders the item's instance name; it is never asked or required.
 --title and --session-name accept {{KEY}} with each item's variables.
 Without --item, the prompt runs once (with no variables).
 Inside tmux, the current session is used; outside, a new session is created and attached.
@@ -169,14 +176,17 @@ items interactively. Saved prompt templates live in
 $XDG_CONFIG_HOME/agent-batch/history.json (or ~/.config/agent-batch/history.json).
 While entering an item, choose "edit" to change its prompt in your editor;
 earlier items keep their already reviewed prompts.
-Choose "title" in an item's preview to override its --title/default name.
+Choose "title" in an item's preview to override its --title/default name,
+or "agent" to run only that item with another instance.
 """,
     )
     cli.add_argument("prompt", nargs="?", help="text with {{KEY}} markers")
     cli.add_argument("--template", metavar="FILE", help="UTF-8 template file, instead of the text")
     cli.add_argument("-i", "--interactive", action="store_true",
                      help="choose a saved prompt and enter items interactively")
-    cli.add_argument("--agent", metavar="NAME", help="agent instance (default: config or claude)")
+    cli.add_argument("--agent", metavar="NAME",
+                     help="batch agent instance; an item's AGENT takes precedence "
+                          "(default: config or claude)")
     cli.add_argument("--config", metavar="FILE", help="alternative TOML configuration file")
     cli.add_argument("--list-agents", action="store_true", help="list instances, types, and commands")
     cli.add_argument("--item", action="append", nargs="+", metavar="KEY=VALUE",
@@ -230,7 +240,7 @@ def working_directory(cli, args):
     return str(directory)
 
 
-def prepare_item(cli, args, template, assignments, number):
+def prepare_item(cli, args, agents, template, assignments, number):
     values = {}
     for assignment in assignments:
         key, separator, value = assignment.partition("=")
@@ -240,6 +250,11 @@ def prepare_item(cli, args, template, assignments, number):
         if key in values:
             cli.error(f"item {number}: duplicate key {key}; use --item for another item")
         values[key] = value
+    # AGENT selects the item's instance and is always available as {{AGENT}}.
+    agent = values.setdefault("AGENT", args.agent)
+    if agent not in agents:
+        cli.error(f"item {number}: unknown instance {agent!r} in AGENT; "
+                  f"available: {', '.join(agents)}")
     # Item values are literal; the name templates apply only when they are absent.
     patterns = {key: pattern for key, pattern in (("TITLE", args.title),
                                                    ("SESSION_NAME", args.session_name))
@@ -261,18 +276,30 @@ def prepare_item(cli, args, template, assignments, number):
                   "must be non-empty, without control characters")
     if "\0" in prompt:
         cli.error(f"item {number}: the prompt cannot contain NUL bytes")
-    return title, session_name, prompt
+    return title, agent, session_name, prompt
 
 
-def prepare(cli, args, template=None):
+def prepare(cli, args, agents, template=None):
     if (args.prompt is None) == (args.template is None):
         cli.error("provide a prompt OR --template FILE")
     if template is None:
         template = read_template(cli, args)
     directory = working_directory(cli, args)
-    jobs = [prepare_item(cli, args, template, assignments, number)
+    jobs = [prepare_item(cli, args, agents, template, assignments, number)
             for number, assignments in enumerate(args.item or [[]], 1)]
     return directory, jobs
+
+
+def agent_command(agents, agent, prompt, session_name):
+    spec = agents[agent]
+    return AGENT_TYPES[spec["type"]](spec["command"], prompt, session_name)
+
+
+def job_heading(number, job, default_agent):
+    title, agent, session_name, _ = job
+    agent = f" · agent: {agent}" if agent != default_agent else ""
+    session = f" · session: {session_name}" if session_name is not None else ""
+    return f"[{number}] {title}{agent}{session}"
 
 
 def enter_template():
@@ -350,12 +377,13 @@ def placeholder_keys(template, args, values):
         patterns.append(args.title)
     if args.session_name is not None and "SESSION_NAME" not in values:
         patterns.append(args.session_name)
-    return list(dict.fromkeys(match.group(1).upper()
-                              for pattern in patterns
-                              for match in PLACEHOLDER.finditer(pattern)))
+    keys = (match.group(1).upper()
+            for pattern in patterns for match in PLACEHOLDER.finditer(pattern))
+    # AGENT always has a value: the batch agent, or the item's "agent" choice.
+    return list(dict.fromkeys(key for key in keys if key != "AGENT"))
 
 
-def interactive_batch(cli, args):
+def interactive_batch(cli, args, agents):
     if args.item:
         cli.error("--item cannot be combined with interactive mode")
     if args.prompt is not None and args.template is not None:
@@ -385,11 +413,11 @@ def interactive_batch(cli, args):
                         values[key] = value
                         break
             assignments = [f"{key}={value}" for key, value in values.items()]
-            job = prepare_item(cli, args, template, assignments, number)
-            print(f"\n[{number}] {job[0]}\n{job[2]}")
+            job = prepare_item(cli, args, agents, template, assignments, number)
+            print(f"\n{job_heading(number, job, args.agent)}\n{job[3]}")
             finish = "preview" if args.dry_run else "launch"
             action = input(f"[a]dd another item, [f]inish and {finish}, [e]dit prompt, "
-                           "[t]itle, [r]edo item, [c]ancel [f]: ").strip().lower()
+                           "[t]itle, a[g]ent, [r]edo item, [c]ancel [f]: ").strip().lower()
             if action in ("", "f", "a"):
                 jobs.append(job)
                 templates.append(template)
@@ -411,6 +439,24 @@ def interactive_batch(cli, args):
                         print("Invalid title; try again.")
                         continue
                     values["TITLE"] = title
+                    break
+            elif action == "g":
+                print(f"Available agents: {', '.join(agents)}")
+                while True:
+                    agent = input(f"Agent for this item (blank for batch agent {args.agent}): ")
+                    agent = agent.strip()
+                    if not agent:
+                        values.pop("AGENT", None)
+                        break
+                    if agent not in agents:
+                        print("Unknown agent; try again.")
+                        continue
+                    try:
+                        agent_command(agents, agent, job[3], job[2])
+                    except ValueError as error:
+                        print(f"Agent {agent}: {error}")
+                        continue
+                    values["AGENT"] = agent
                     break
             elif action == "r":
                 values = {}
@@ -517,7 +563,7 @@ def main():
         if not sys.stdin.isatty():
             cli.error("interactive mode requires a terminal")
         try:
-            batch = interactive_batch(cli, args)
+            batch = interactive_batch(cli, args, agents)
         except (EOFError, KeyboardInterrupt):
             print("\nCancelled.", file=sys.stderr)
             return 130
@@ -527,25 +573,25 @@ def main():
         directory, jobs, templates = batch
     else:
         template = read_template(cli, args) if args.prompt is not None or args.template is not None else None
-        directory, jobs = prepare(cli, args, template)
+        directory, jobs = prepare(cli, args, agents, template)
         templates = [template]
-    try:
-        invocations = [AGENT_TYPES[spec["type"]](spec["command"], prompt, session_name)
-                       for _, session_name, prompt in jobs]
-    except ValueError as error:
-        cli.error(f"instance {args.agent}: {error}")
+    invocations = []
+    for number, (_, agent, session_name, prompt) in enumerate(jobs, 1):
+        try:
+            invocations.append(agent_command(agents, agent, prompt, session_name))
+        except ValueError as error:
+            cli.error(f"item {number}: instance {agent}: {error}")
     if args.dry_run:
         print(f"Agent: {args.agent} (type: {spec['type']})\n"
               f"Base command: {shlex.join(spec['command'])}\n"
               f"Directory: {directory}\nLayout: {args.layout}")
-        for number, (title, session_name, prompt) in enumerate(jobs, 1):
-            session = f" · session: {session_name}" if session_name is not None else ""
-            print(f"\n[{number}] {title}{session}\n{prompt}")
+        for number, job in enumerate(jobs, 1):
+            print(f"\n{job_heading(number, job, args.agent)}\n{job[3]}")
         return 0
     save_history(cli, templates)
     try:
         launch(args, directory, [(title, invocation)
-                                 for (title, _, _), invocation in zip(jobs, invocations)])
+                                 for (title, *_), invocation in zip(jobs, invocations)])
     except (OSError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

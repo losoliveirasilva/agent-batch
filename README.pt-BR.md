@@ -24,13 +24,13 @@ agent-batch 'Revise {{PR_URL}} considerando {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs.
+Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `AGENT` executa um item com outra instância de IA (veja [Agente por item](#agente-por-item)). `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs.
 
 ### Modo interativo e histórico
 
-Execute `agent-batch` sem argumentos em um terminal para escolher um prompt salvo ou criar outro. Também é possível começar com um prompt ou arquivo específico: `agent-batch -i 'Revise {{PR_URL}}'` ou `agent-batch -i --template review.txt`. O programa pergunta o valor de cada marcador `{{CHAVE}}` e mostra o prompt montado. No mesmo menu, você pode adicionar outro item, editar o prompt, definir um título específico com `t`, refazer o item ou terminar e iniciar o lote. Sem essa escolha, o título vem de `--title` ou do padrão `task-1`, `task-2` etc. `--agent`, `--path`, `--layout`, `--detach` e `--dry-run` continuam disponíveis nesse modo.
+Execute `agent-batch` sem argumentos em um terminal para escolher um prompt salvo ou criar outro. Também é possível começar com um prompt ou arquivo específico: `agent-batch -i 'Revise {{PR_URL}}'` ou `agent-batch -i --template review.txt`. O programa pergunta o valor de cada marcador `{{CHAVE}}` e mostra o prompt montado. No mesmo menu, você pode adicionar outro item, editar o prompt, definir um título específico com `t`, executar aquele item com outra instância de IA com `g`, refazer o item ou terminar e iniciar o lote. Sem essa escolha, o título vem de `--title` ou do padrão `task-1`, `task-2` etc. `--agent`, `--path`, `--layout`, `--detach` e `--dry-run` continuam disponíveis nesse modo.
 
-O agente, o caminho e o layout aparecem logo na abertura, sem uma pergunta adicional. Para alterá-los, cancele com `Ctrl-C` e execute novamente usando as opções indicadas. As mensagens exibidas pelo CLI são em inglês; escolher `finish and launch` na prévia do último item inicia o lote, sem outra confirmação.
+O agente do lote, o caminho e o layout aparecem logo na abertura, sem uma pergunta adicional. Para alterá-los, cancele com `Ctrl-C` e execute novamente usando as opções indicadas. As mensagens exibidas pelo CLI são em inglês; escolher `finish and launch` na prévia do último item inicia o lote, sem outra confirmação.
 
 Ao criar um prompt no terminal, termine a entrada com uma linha contendo apenas `.`. Para buscar no histórico, digite `/texto` na escolha do prompt. O histórico guarda os **modelos**, sem os valores preenchidos, em `~/.config/agent-batch/history.json` (ou `$XDG_CONFIG_HOME/agent-batch/history.json`). Execuções feitas com os argumentos tradicionais também alimentam esse histórico; `--dry-run` não o altera. O arquivo fica fora do repositório.
 
@@ -48,9 +48,23 @@ agent-batch 'Revise {{PR_URL}}' --title 'PR {{PR}}' --session-name 'review {{PR}
   --item PR=124 PR_URL=https://github.com/org/repo/pull/124 SESSION_NAME=urgente
 ```
 
-Sem `TITLE` nem `--title`, as janelas se chamam `PREFIXO-1`, `PREFIXO-2` etc. Sem `SESSION_NAME` nem `--session-name`, a IA usa o nome de sessão padrão dela. O Codex não aceita nome de sessão pela linha de comando (apenas `/rename` dentro da sessão); por isso, um nome de sessão com uma instância `codex` é rejeitado antes de iniciar qualquer coisa.
+Sem `TITLE` nem `--title`, as janelas se chamam `PREFIXO-1`, `PREFIXO-2` etc. Sem `SESSION_NAME` nem `--session-name`, a IA usa o nome de sessão padrão dela. O Codex não aceita nome de sessão pela linha de comando (apenas `/rename` dentro da sessão); por isso, um nome de sessão em um item que usa uma instância `codex` é rejeitado antes de iniciar qualquer coisa.
 
 O padrão é uma janela por execução (`--layout window`). Para painéis na mesma janela, use `--layout pane`, com `--pane-layout even-horizontal` (lado a lado), `even-vertical` (empilhados) ou `tiled` (grade). Dentro do tmux, usa a sessão atual; fora, cria e abre uma nova sessão. `--detach` cria as execuções sem abrir a sessão nem mudar seu foco.
+
+### Agente por item
+
+`--agent` (ou `default_agent` na configuração) define o agente do lote. A chave de item `AGENT` executa apenas aquele item com outra instância. `{{AGENT}}` sempre é renderizado com o nome da instância do item no prompt, em `--title` e em `--session-name`; por isso, nunca é perguntado nem acusado como ausente. Assim, cada item pode escrever em um arquivo próprio:
+
+```sh
+agent-batch 'Revise {{PR_URL}} e escreva as conclusões em reviews/{{PR}}-{{AGENT}}.md' \
+  --agent claude --title 'PR {{PR}} ({{AGENT}})' \
+  --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \
+  --item PR=123 PR_URL=https://github.com/org/repo/pull/123 AGENT=codex \
+  --item PR=124 PR_URL=https://github.com/org/repo/pull/124
+```
+
+O primeiro e o terceiro itens executam `claude` e escrevem `reviews/123-claude.md` e `reviews/124-claude.md`; o segundo executa `codex` e escreve `reviews/123-codex.md`. `AGENT` deve nomear uma instância disponível (veja `--list-agents`). No `--dry-run`, itens cujo agente difere do agente do lote aparecem marcados com `· agent: NOME`.
 
 ## Tipos e instâncias de IA
 
