@@ -12,6 +12,7 @@ import runpy
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -181,6 +182,92 @@ class TemplateTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as error:
                     self.prepare(*arguments)
                 self.assertEqual(error.exception.code, 2)
+
+
+class InteractiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="agent-batch-interactive-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        environment = patch.dict(os.environ, HOME=str(self.root), XDG_CONFIG_HOME=str(self.root))
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_history_is_local_searchable_and_deduplicated(self):
+        cli = MODULE["parser"]()
+        MODULE["save_history"](cli, ["Review {{URL}}", "Implement {{TASK}}"])
+        MODULE["save_history"](cli, ["Review {{URL}}"])
+        path = self.root / "agent-batch/history.json"
+        self.assertEqual(MODULE["load_history"](cli),
+                         ["Review {{URL}}", "Implement {{TASK}}"])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with patch("builtins.input", side_effect=["/implement", "1"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(MODULE["choose_template"](cli), "Implement {{TASK}}")
+
+    def test_editing_current_item_keeps_earlier_prompts(self):
+        cli = MODULE["parser"]()
+        args = cli.parse_args(["-i", "--agent", "claude", "Revise {{URL}}"])
+        answers = ["one", "a", "four", "e", "https://tracker.example/issues/4", "f"]
+        updated = "Revise {{URL}}\nIssue: {{ISSUE_URL}}"
+        with patch("builtins.input", side_effect=answers), \
+                patch.dict(MODULE["interactive_batch"].__globals__,
+                           edit_template=lambda parser, template: updated), \
+                contextlib.redirect_stdout(io.StringIO()):
+            directory, jobs, templates = MODULE["interactive_batch"](cli, args)
+        self.assertEqual(directory, str(Path.cwd()))
+        self.assertEqual(jobs, [("task-1", None, "Revise one"),
+                                ("task-2", None,
+                                 "Revise four\nIssue: https://tracker.example/issues/4")])
+        self.assertEqual(templates, ["Revise {{URL}}", updated])
+
+    def test_external_editor_updates_template(self):
+        script = self.root / "editor.py"
+        script.write_text('import pathlib, sys\n'
+                          'pathlib.Path(sys.argv[1]).write_text("Review {{URL}}\\nIssue: '
+                          '{{ISSUE_URL}}", encoding="utf-8")\n')
+        with patch.dict(os.environ, EDITOR=f"{sys.executable} {script}", VISUAL=""):
+            updated = MODULE["edit_template"](MODULE["parser"](), "Review {{URL}}")
+        self.assertEqual(updated, "Review {{URL}}\nIssue: {{ISSUE_URL}}")
+
+    def test_title_uses_batch_default_unless_overridden_in_item_menu(self):
+        cli = MODULE["parser"]()
+        args = cli.parse_args(["-i", "--agent", "claude", "--title", "PR {{URL}}",
+                               "Review {{URL}}"])
+        with patch("builtins.input", side_effect=["one", "f"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            _, jobs, _ = MODULE["interactive_batch"](cli, args)
+        self.assertEqual(jobs, [("PR one", None, "Review one")])
+        with patch("builtins.input", side_effect=["two", "t", "Special review", "f"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            _, jobs, _ = MODULE["interactive_batch"](cli, args)
+        self.assertEqual(jobs, [("Special review", None, "Review two")])
+
+    def test_regular_run_saves_template_and_explicit_interactive_needs_tty(self):
+        with patch.object(sys, "argv", [str(SCRIPT), "Review {{URL}}", "--item", "URL=one"]), \
+                patch.dict(MODULE["main"].__globals__, launch=lambda *args: None):
+            self.assertEqual(MODULE["main"](), 0)
+        self.assertEqual(MODULE["load_history"](MODULE["parser"]()), ["Review {{URL}}"])
+        result = subprocess.run([str(SCRIPT), "-i", "hello", "--dry-run"],
+                                input="", capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires a terminal", result.stderr)
+
+    def test_no_argument_terminal_flow_starts_interactive_mode(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        answers = ["Revise {{URL}}", ".", "https://example.test/pr/1", "f"]
+        output = io.StringIO()
+        with patch.object(sys, "argv", [str(SCRIPT), "--dry-run"]), \
+                patch.object(sys, "stdin", Terminal()), \
+                patch("builtins.input", side_effect=answers), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(MODULE["main"](), 0)
+        self.assertIn(f"Agent: claude\nPath: {Path.cwd()}\nLayout: window", output.getvalue())
+        self.assertIn("Revise https://example.test/pr/1", output.getvalue())
+        self.assertFalse((self.root / "agent-batch/history.json").exists())
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux not installed")

@@ -26,6 +26,16 @@ agent-batch 'Revise {{PR_URL}} considerando {{TYPE}}' \
 
 Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs.
 
+### Modo interativo e histórico
+
+Execute `agent-batch` sem argumentos em um terminal para escolher um prompt salvo ou criar outro. Também é possível começar com um prompt ou arquivo específico: `agent-batch -i 'Revise {{PR_URL}}'` ou `agent-batch -i --template review.txt`. O programa pergunta o valor de cada marcador `{{CHAVE}}` e mostra o prompt montado. No mesmo menu, você pode adicionar outro item, editar o prompt, definir um título específico com `t`, refazer o item ou terminar e iniciar o lote. Sem essa escolha, o título vem de `--title` ou do padrão `task-1`, `task-2` etc. `--agent`, `--path`, `--layout`, `--detach` e `--dry-run` continuam disponíveis nesse modo.
+
+O agente, o caminho e o layout aparecem logo na abertura, sem uma pergunta adicional. Para alterá-los, cancele com `Ctrl-C` e execute novamente usando as opções indicadas. As mensagens exibidas pelo CLI são em inglês; escolher `finish and launch` na prévia do último item inicia o lote, sem outra confirmação.
+
+Ao criar um prompt no terminal, termine a entrada com uma linha contendo apenas `.`. Para buscar no histórico, digite `/texto` na escolha do prompt. O histórico guarda os **modelos**, sem os valores preenchidos, em `~/.config/agent-batch/history.json` (ou `$XDG_CONFIG_HOME/agent-batch/history.json`). Execuções feitas com os argumentos tradicionais também alimentam esse histórico; `--dry-run` não o altera. O arquivo fica fora do repositório.
+
+Na prévia de um item, escolha `e` para editar o modelo no editor indicado por `$VISUAL` ou `$EDITOR` (padrão: `vi`). Se você adicionar `{{ISSUE_URL}}` ao preencher o quarto item, o programa pergunta o valor dessa nova chave e preserva os valores já informados para o item. Os três itens anteriores mantêm seus prompts originais; a edição vale para o item atual e os seguintes. Escolha `r` para refazer os valores do item atual.
+
 ### Títulos de janela e nomes de sessão
 
 `TITLE` nomeia a janela/painel do tmux. `SESSION_NAME` nomeia a própria sessão da IA (no Claude, `claude --name`, exibido na caixa de prompt, no seletor do `/resume` e no título do terminal). Ambos são chaves do item, e seus valores são literais, como todo valor de item.

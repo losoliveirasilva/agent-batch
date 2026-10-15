@@ -26,6 +26,16 @@ agent-batch 'Review {{PR_URL}} with a focus on {{TYPE}}' \
 
 Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents.
 
+### Interactive mode and prompt history
+
+Run `agent-batch` without arguments in a terminal to select a saved prompt or create one. You can also start with a specific prompt or file: `agent-batch -i 'Review {{PR_URL}}'` or `agent-batch -i --template review.txt`. The program asks for each `{{KEY}}` value and previews the rendered prompt. From the same menu, you can add another item, edit the prompt, override that item's window/pane title with `t`, redo the item, or finish and launch the batch. Titles use `--title` or the usual `task-1`, `task-2` defaults unless overridden. `--agent`, `--path`, `--layout`, `--detach`, and `--dry-run` also work in this mode.
+
+The agent, path, and layout are shown immediately, without another question. To change them, press `Ctrl-C` and rerun with the indicated options. Choosing `finish and launch` at the last item's preview starts the batch without another confirmation.
+
+When entering a new prompt in the terminal, finish with a line containing only `.`. At the prompt picker, type `/text` to search history. History stores **templates**, without filled item values, in `~/.config/agent-batch/history.json` (or `$XDG_CONFIG_HOME/agent-batch/history.json`). Traditional command-line runs also add to this history; `--dry-run` does not. The file is outside the repository.
+
+At an item's preview, choose `e` to edit the template in `$VISUAL` or `$EDITOR` (default: `vi`). If you add `{{ISSUE_URL}}` while filling the fourth item, the program asks for the new key and keeps values already entered for that item. Earlier items keep their original prompts; the edit applies to the current and following items. Choose `r` to enter the current item's values again.
+
 ### Window titles and session names
 
 `TITLE` names the tmux window or pane. `SESSION_NAME` names the agent session itself (for Claude, `claude --name`, shown in the prompt box, the `/resume` picker, and the terminal title). Both are per-item keys, and their values are literal, like every item value.

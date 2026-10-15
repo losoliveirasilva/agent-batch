@@ -2,6 +2,7 @@
 """Render a batch of prompts and open interactive agents in tmux."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -9,12 +10,60 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 
 PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 AGENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+HISTORY_LIMIT = 100
+
+
+def history_path():
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return config_home / "agent-batch/history.json"
+
+
+def load_history(cli):
+    path = history_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError, ValueError) as error:
+        cli.error(f"cannot read prompt history {path}: {error}")
+    if (not isinstance(data, dict) or data.get("version") != 1
+            or not isinstance(data.get("templates"), list)
+            or any(not isinstance(prompt, str) or not prompt.strip()
+                   for prompt in data["templates"])):
+        cli.error(f"invalid prompt history in {path}")
+    return data["templates"]
+
+
+def save_history(cli, templates):
+    if not templates:
+        return
+    history = load_history(cli)
+    for template in templates:
+        if template in history:
+            history.remove(template)
+        history.insert(0, template)
+    path = history_path()
+    temporary = None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=".history-", dir=path.parent)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump({"version": 1, "templates": history[:HISTORY_LIMIT]}, output,
+                      ensure_ascii=False, indent=2)
+            output.write("\n")
+        os.replace(temporary, path)
+    except OSError as error:
+        cli.error(f"cannot save prompt history {path}: {error}")
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def claude_command(command, prompt, session_name=None):
@@ -115,10 +164,18 @@ When an agent exits, the shell stays open so you can review the output.
 Built-in instances: claude and codex. Customize them in
 $XDG_CONFIG_HOME/agent-batch/config.toml (or ~/.config/agent-batch/config.toml).
 Use --list-agents to list the available instances.
+Run without a prompt in a terminal, or use -i with a prompt/template, to enter
+items interactively. Saved prompt templates live in
+$XDG_CONFIG_HOME/agent-batch/history.json (or ~/.config/agent-batch/history.json).
+While entering an item, choose "edit" to change its prompt in your editor;
+earlier items keep their already reviewed prompts.
+Choose "title" in an item's preview to override its --title/default name.
 """,
     )
     cli.add_argument("prompt", nargs="?", help="text with {{KEY}} markers")
     cli.add_argument("--template", metavar="FILE", help="UTF-8 template file, instead of the text")
+    cli.add_argument("-i", "--interactive", action="store_true",
+                     help="choose a saved prompt and enter items interactively")
     cli.add_argument("--agent", metavar="NAME", help="agent instance (default: config or claude)")
     cli.add_argument("--config", metavar="FILE", help="alternative TOML configuration file")
     cli.add_argument("--list-agents", action="store_true", help="list instances, types, and commands")
@@ -150,56 +207,217 @@ def render(template, values):
     return PLACEHOLDER.sub(lambda match: values[match.group(1).upper()], template)
 
 
-def prepare(cli, args):
-    if (args.prompt is None) == (args.template is None):
-        cli.error("provide a prompt OR --template FILE")
+def read_template(cli, args):
     try:
         template = (Path(args.template).expanduser().read_text(encoding="utf-8")
                     if args.template is not None else args.prompt)
-        directory = Path(args.path).expanduser().resolve(strict=True)
     except (OSError, UnicodeError, ValueError) as error:
+        cli.error(str(error))
+    if not template.strip():
+        cli.error("the template cannot be empty")
+    return template
+
+
+def working_directory(cli, args):
+    try:
+        directory = Path(args.path).expanduser().resolve(strict=True)
+    except (OSError, ValueError) as error:
         cli.error(str(error))
     if not directory.is_dir():
         cli.error(f"not a directory: {directory}")
-    if not template.strip():
-        cli.error("the template cannot be empty")
     if not valid_title(args.prefix):
         cli.error("--prefix must be a non-empty name without control characters")
+    return str(directory)
 
+
+def prepare_item(cli, args, template, assignments, number):
+    values = {}
+    for assignment in assignments:
+        key, separator, value = assignment.partition("=")
+        if not separator or not KEY.fullmatch(key):
+            cli.error(f"item {number}: expected KEY=VALUE, got {assignment!r}")
+        key = key.upper()
+        if key in values:
+            cli.error(f"item {number}: duplicate key {key}; use --item for another item")
+        values[key] = value
+    # Item values are literal; the name templates apply only when they are absent.
+    patterns = {key: pattern for key, pattern in (("TITLE", args.title),
+                                                   ("SESSION_NAME", args.session_name))
+                if pattern is not None and key not in values}
+    missing = sorted({match.group(1).upper()
+                      for text in (template, *patterns.values())
+                      for match in PLACEHOLDER.finditer(text)} - values.keys())
+    if missing:
+        cli.error(f"item {number}: missing keys {', '.join(missing)}")
+    prompt = render(template, values)
+    names = values | {key: render(pattern, values) for key, pattern in patterns.items()}
+    title = names.get("TITLE", f"{args.prefix}-{number}")
+    session_name = names.get("SESSION_NAME")
+    if not valid_title(title):
+        cli.error(f"item {number}: the title (TITLE or --title) must be non-empty, "
+                  "without control characters")
+    if session_name is not None and not valid_title(session_name):
+        cli.error(f"item {number}: the session name (SESSION_NAME or --session-name) "
+                  "must be non-empty, without control characters")
+    if "\0" in prompt:
+        cli.error(f"item {number}: the prompt cannot contain NUL bytes")
+    return title, session_name, prompt
+
+
+def prepare(cli, args, template=None):
+    if (args.prompt is None) == (args.template is None):
+        cli.error("provide a prompt OR --template FILE")
+    if template is None:
+        template = read_template(cli, args)
+    directory = working_directory(cli, args)
+    jobs = [prepare_item(cli, args, template, assignments, number)
+            for number, assignments in enumerate(args.item or [[]], 1)]
+    return directory, jobs
+
+
+def enter_template():
+    print("Paste the prompt. End with a line containing only a period (.):")
+    lines = []
+    while True:
+        line = input()
+        if line == ".":
+            template = "\n".join(lines)
+            if template.strip():
+                return template
+            print("The prompt cannot be empty. Try again:")
+            lines = []
+        else:
+            lines.append(line)
+
+
+def edit_template(cli, template):
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    try:
+        command = shlex.split(editor)
+    except ValueError as error:
+        cli.error(f"invalid editor command: {error}")
+    if not command or not shutil.which(command[0]):
+        cli.error(f"editor not found: {editor}")
+    descriptor, name = tempfile.mkstemp(prefix="agent-batch-prompt-", suffix=".txt")
+    path = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(template)
+        result = subprocess.run([*command, name])
+        if result.returncode:
+            cli.error(f"editor exited with status {result.returncode}")
+        edited = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        cli.error(f"cannot edit prompt: {error}")
+    finally:
+        path.unlink(missing_ok=True)
+    if not edited.strip():
+        print("The prompt cannot be empty; the previous version was kept.")
+        return template
+    return edited
+
+
+def choose_template(cli):
+    history = load_history(cli)
+    if not history:
+        print("No prompts saved in history yet.")
+        return enter_template()
+    matches = history
+    while True:
+        print("\nSaved prompts:")
+        for number, template in enumerate(matches[:12], 1):
+            preview = " ".join(template.split())
+            print(f"  {number}. {preview[:100]}{'…' if len(preview) > 100 else ''}")
+        if len(matches) > 12:
+            print(f"  ({len(matches) - 12} more; narrow your search)")
+        choice = input("Number, /text to search, or n for a new prompt: ").strip()
+        if choice.lower() == "n":
+            return enter_template()
+        if choice.startswith("/"):
+            query = choice[1:].casefold()
+            matches = [template for template in history if query in template.casefold()]
+            if not matches:
+                print("No matching prompts.")
+            continue
+        if choice.isdecimal() and 1 <= int(choice) <= min(len(matches), 12):
+            return matches[int(choice) - 1]
+        print("Choose a listed number, search, or enter n.")
+
+
+def placeholder_keys(template, args, values):
+    patterns = [template]
+    if args.title is not None and "TITLE" not in values:
+        patterns.append(args.title)
+    if args.session_name is not None and "SESSION_NAME" not in values:
+        patterns.append(args.session_name)
+    return list(dict.fromkeys(match.group(1).upper()
+                              for pattern in patterns
+                              for match in PLACEHOLDER.finditer(pattern)))
+
+
+def interactive_batch(cli, args):
+    if args.item:
+        cli.error("--item cannot be combined with interactive mode")
+    if args.prompt is not None and args.template is not None:
+        cli.error("provide a prompt OR --template FILE")
+    directory = working_directory(cli, args)
+    print(f"Agent: {args.agent}\nPath: {directory}\nLayout: {args.layout}")
+    if args.layout == "pane":
+        print(f"Pane layout: {args.pane_layout}")
+    print("To change these, press Ctrl-C and rerun with --agent, --path, or --layout.")
+    template = (read_template(cli, args) if args.prompt is not None or args.template is not None
+                else choose_template(cli))
     jobs = []
-    for number, assignments in enumerate(args.item or [[]], 1):
+    templates = []
+    while True:
+        number = len(jobs) + 1
         values = {}
-        for assignment in assignments:
-            key, separator, value = assignment.partition("=")
-            if not separator or not KEY.fullmatch(key):
-                cli.error(f"item {number}: expected KEY=VALUE, got {assignment!r}")
-            key = key.upper()
-            if key in values:
-                cli.error(f"item {number}: duplicate key {key}; use --item for another item")
-            values[key] = value
-        # Item values are literal; the name templates apply only when they are absent.
-        patterns = {key: pattern for key, pattern in (("TITLE", args.title),
-                                                       ("SESSION_NAME", args.session_name))
-                    if pattern is not None and key not in values}
-        missing = sorted({match.group(1).upper()
-                          for text in (template, *patterns.values())
-                          for match in PLACEHOLDER.finditer(text)} - values.keys())
-        if missing:
-            cli.error(f"item {number}: missing keys {', '.join(missing)}")
-        prompt = render(template, values)
-        names = values | {key: render(pattern, values) for key, pattern in patterns.items()}
-        title = names.get("TITLE", f"{args.prefix}-{number}")
-        session_name = names.get("SESSION_NAME")
-        if not valid_title(title):
-            cli.error(f"item {number}: the title (TITLE or --title) must be non-empty, "
-                      "without control characters")
-        if session_name is not None and not valid_title(session_name):
-            cli.error(f"item {number}: the session name (SESSION_NAME or --session-name) "
-                      "must be non-empty, without control characters")
-        if "\0" in prompt:
-            cli.error(f"item {number}: the prompt cannot contain NUL bytes")
-        jobs.append((title, session_name, prompt))
-    return str(directory), jobs
+        while True:
+            print(f"\nItem {number}:")
+            for key in placeholder_keys(template, args, values):
+                if key not in values:
+                    while True:
+                        value = input(f"{key}: ")
+                        if "\0" in value or (key in ("TITLE", "SESSION_NAME")
+                                               and not valid_title(value)):
+                            print(f"Invalid value for {key}.")
+                            continue
+                        values[key] = value
+                        break
+            assignments = [f"{key}={value}" for key, value in values.items()]
+            job = prepare_item(cli, args, template, assignments, number)
+            print(f"\n[{number}] {job[0]}\n{job[2]}")
+            finish = "preview" if args.dry_run else "launch"
+            action = input(f"[a]dd another item, [f]inish and {finish}, [e]dit prompt, "
+                           "[t]itle, [r]edo item, [c]ancel [f]: ").strip().lower()
+            if action in ("", "f", "a"):
+                jobs.append(job)
+                templates.append(template)
+                if action in ("", "f"):
+                    return directory, jobs, templates
+                break
+            if action == "e":
+                template = edit_template(cli, template)
+            elif action == "t":
+                while True:
+                    title = input("Window/pane title (blank for batch default): ")
+                    if not title:
+                        if "TITLE" in placeholder_keys(template, args, {}):
+                            print("TITLE is required by the prompt or name template.")
+                            continue
+                        values.pop("TITLE", None)
+                        break
+                    if not valid_title(title):
+                        print("Invalid title; try again.")
+                        continue
+                    values["TITLE"] = title
+                    break
+            elif action == "r":
+                values = {}
+            elif action == "c":
+                return None
+            else:
+                print("Invalid choice.")
 
 
 def tmux(*args):
@@ -293,7 +511,24 @@ def main():
     if args.agent not in agents:
         cli.error(f"unknown instance: {args.agent!r}; available: {', '.join(agents)}")
     spec = agents[args.agent]
-    directory, jobs = prepare(cli, args)
+    interactive = (args.interactive or (args.prompt is None and args.template is None
+                                       and args.item is None and sys.stdin.isatty()))
+    if interactive:
+        if not sys.stdin.isatty():
+            cli.error("interactive mode requires a terminal")
+        try:
+            batch = interactive_batch(cli, args)
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.", file=sys.stderr)
+            return 130
+        if batch is None:
+            print("Batch cancelled.")
+            return 0
+        directory, jobs, templates = batch
+    else:
+        template = read_template(cli, args) if args.prompt is not None or args.template is not None else None
+        directory, jobs = prepare(cli, args, template)
+        templates = [template]
     try:
         invocations = [AGENT_TYPES[spec["type"]](spec["command"], prompt, session_name)
                        for _, session_name, prompt in jobs]
@@ -307,6 +542,7 @@ def main():
             session = f" · session: {session_name}" if session_name is not None else ""
             print(f"\n[{number}] {title}{session}\n{prompt}")
         return 0
+    save_history(cli, templates)
     try:
         launch(args, directory, [(title, invocation)
                                  for (title, _, _), invocation in zip(jobs, invocations)])
