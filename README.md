@@ -24,7 +24,7 @@ agent-batch 'Review {{PR_URL}} with a focus on {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `AGENT` runs one item with another agent instance (see [Agent per item](#agent-per-item)). `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents. `--var` sets values shared by every item (see [Shared variables](#shared-variables)).
+Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `AGENT` runs one item with another agent instance (see [Agent per item](#agent-per-item)), and `PATH` runs it in another directory (see [Directory per item](#directory-per-item)). `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents. `--var` sets values shared by every item (see [Shared variables](#shared-variables)).
 
 ### Shared variables
 
@@ -37,11 +37,11 @@ agent-batch 'Review {{PR_URL}} in {{REPO}} with a focus on {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Both items use `REPO=org/repo`; the first uses `TYPE=backend`, and the second overrides it with `frontend`. Shared values also fill `{{KEY}}` in `--title` and `--session-name`, and are literal like item values. List several pairs after `--var` or repeat it. Like `--item`, it takes every following argument, so write the prompt before it. `AGENT`, `TITLE`, and `SESSION_NAME` cannot be shared; use `--agent`, `--title`, and `--session-name`. Without `--item`, the prompt runs once with the shared values.
+Both items use `REPO=org/repo`; the first uses `TYPE=backend`, and the second overrides it with `frontend`. Shared values also fill `{{KEY}}` in `--title` and `--session-name`, and are literal like item values. List several pairs after `--var` or repeat it. Like `--item`, it takes every following argument, so write the prompt before it. `AGENT`, `PATH`, `TITLE`, and `SESSION_NAME` cannot be shared; use `--agent`, `--path`, `--title`, and `--session-name`. Without `--item`, the prompt runs once with the shared values.
 
 ### Interactive mode and prompt history
 
-Run `agent-batch` without arguments in a terminal to select a saved prompt or create one. You can also start with a specific prompt or file: `agent-batch -i 'Review {{PR_URL}}'` or `agent-batch -i --template review.txt`. The program asks for each `{{KEY}}` value and previews the rendered prompt. From the same menu, you can add another item, edit the prompt, override that item's window/pane title with `t`, run that item with another agent instance with `g`, redo the item, or finish and launch the batch. Titles use `--title` or the usual `task-1`, `task-2` defaults unless overridden. `--agent`, `--path`, `--layout`, `--var`, `--detach`, and `--dry-run` also work in this mode; shared keys are not asked for.
+Run `agent-batch` without arguments in a terminal to select a saved prompt or create one. You can also start with a specific prompt or file: `agent-batch -i 'Review {{PR_URL}}'` or `agent-batch -i --template review.txt`. The program asks for each `{{KEY}}` value and previews the rendered prompt. From the same menu, you can add another item, edit the prompt, override that item's window/pane title with `t`, run that item with another agent instance with `g` or in another directory with `p`, redo the item, or finish and launch the batch. Titles use `--title` or the usual `task-1`, `task-2` defaults unless overridden. `--agent`, `--path`, `--layout`, `--var`, `--detach`, and `--dry-run` also work in this mode; shared keys are not asked for.
 
 The batch agent, path, layout, and shared variables are shown immediately, without another question. To change them, press `Ctrl-C` and rerun with the indicated options. Choosing `finish and launch` at the last item's preview starts the batch without another confirmation.
 
@@ -78,6 +78,19 @@ agent-batch 'Review {{PR_URL}} and write the findings to reviews/{{PR}}-{{AGENT}
 ```
 
 The first and third items run `claude` and write `reviews/123-claude.md` and `reviews/124-claude.md`; the second runs `codex` and writes `reviews/123-codex.md`. `AGENT` must name an available instance (see `--list-agents`). `--dry-run` marks items whose agent differs from the batch agent with `· agent: NAME`.
+
+### Directory per item
+
+`--path` sets the batch directory (default: the current directory). The `PATH` item key runs only that item in another directory, so each agent starts inside its own repository and picks up that repository's project files (for Claude, `CLAUDE.md` and `.claude/`). A relative `PATH` is resolved against `--path`; `~` and absolute paths are used as given:
+
+```sh
+agent-batch --template review.md --path ~/projects --title '{{PATH}} #{{PR}}' \
+  --item PATH=api PR=12 \
+  --item PATH=web PR=34 \
+  --item PATH=~/work/site PR=56
+```
+
+The items run in `~/projects/api`, `~/projects/web`, and `~/work/site`. Every directory must exist; otherwise, nothing starts. Like `TITLE`, `{{PATH}}` renders the item's literal value and is required only where a template uses it. `--dry-run` marks items whose directory differs from the batch directory with `· path: DIRECTORY`.
 
 ## Agent types and instances
 

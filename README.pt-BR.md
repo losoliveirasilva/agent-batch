@@ -24,7 +24,7 @@ agent-batch 'Revise {{PR_URL}} considerando {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `AGENT` executa um item com outra instância de IA (veja [Agente por item](#agente-por-item)). `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs. `--var` define valores compartilhados por todos os itens (veja [Variáveis compartilhadas](#variáveis-compartilhadas)).
+Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `AGENT` executa um item com outra instância de IA (veja [Agente por item](#agente-por-item)), e `PATH` o executa em outro diretório (veja [Diretório por item](#diretório-por-item)). `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs. `--var` define valores compartilhados por todos os itens (veja [Variáveis compartilhadas](#variáveis-compartilhadas)).
 
 ### Variáveis compartilhadas
 
@@ -37,11 +37,11 @@ agent-batch 'Revise {{PR_URL}} em {{REPO}} considerando {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Os dois itens usam `REPO=org/repo`; o primeiro usa `TYPE=backend`, e o segundo o substitui por `frontend`. Os valores compartilhados também preenchem `{{CHAVE}}` em `--title` e `--session-name` e são literais, como os valores de item. Liste vários pares após `--var` ou repita a opção. Assim como `--item`, ela consome todos os argumentos seguintes; por isso, escreva o prompt antes dela. `AGENT`, `TITLE` e `SESSION_NAME` não podem ser compartilhados; use `--agent`, `--title` e `--session-name`. Sem `--item`, o prompt roda uma vez com os valores compartilhados.
+Os dois itens usam `REPO=org/repo`; o primeiro usa `TYPE=backend`, e o segundo o substitui por `frontend`. Os valores compartilhados também preenchem `{{CHAVE}}` em `--title` e `--session-name` e são literais, como os valores de item. Liste vários pares após `--var` ou repita a opção. Assim como `--item`, ela consome todos os argumentos seguintes; por isso, escreva o prompt antes dela. `AGENT`, `PATH`, `TITLE` e `SESSION_NAME` não podem ser compartilhados; use `--agent`, `--path`, `--title` e `--session-name`. Sem `--item`, o prompt roda uma vez com os valores compartilhados.
 
 ### Modo interativo e histórico
 
-Execute `agent-batch` sem argumentos em um terminal para escolher um prompt salvo ou criar outro. Também é possível começar com um prompt ou arquivo específico: `agent-batch -i 'Revise {{PR_URL}}'` ou `agent-batch -i --template review.txt`. O programa pergunta o valor de cada marcador `{{CHAVE}}` e mostra o prompt montado. No mesmo menu, você pode adicionar outro item, editar o prompt, definir um título específico com `t`, executar aquele item com outra instância de IA com `g`, refazer o item ou terminar e iniciar o lote. Sem essa escolha, o título vem de `--title` ou do padrão `task-1`, `task-2` etc. `--agent`, `--path`, `--layout`, `--var`, `--detach` e `--dry-run` continuam disponíveis nesse modo; as chaves compartilhadas não são perguntadas.
+Execute `agent-batch` sem argumentos em um terminal para escolher um prompt salvo ou criar outro. Também é possível começar com um prompt ou arquivo específico: `agent-batch -i 'Revise {{PR_URL}}'` ou `agent-batch -i --template review.txt`. O programa pergunta o valor de cada marcador `{{CHAVE}}` e mostra o prompt montado. No mesmo menu, você pode adicionar outro item, editar o prompt, definir um título específico com `t`, executar aquele item com outra instância de IA com `g` ou em outro diretório com `p`, refazer o item ou terminar e iniciar o lote. Sem essa escolha, o título vem de `--title` ou do padrão `task-1`, `task-2` etc. `--agent`, `--path`, `--layout`, `--var`, `--detach` e `--dry-run` continuam disponíveis nesse modo; as chaves compartilhadas não são perguntadas.
 
 O agente do lote, o caminho, o layout e as variáveis compartilhadas aparecem logo na abertura, sem uma pergunta adicional. Para alterá-los, cancele com `Ctrl-C` e execute novamente usando as opções indicadas. As mensagens exibidas pelo CLI são em inglês; escolher `finish and launch` na prévia do último item inicia o lote, sem outra confirmação.
 
@@ -78,6 +78,19 @@ agent-batch 'Revise {{PR_URL}} e escreva as conclusões em reviews/{{PR}}-{{AGEN
 ```
 
 O primeiro e o terceiro itens executam `claude` e escrevem `reviews/123-claude.md` e `reviews/124-claude.md`; o segundo executa `codex` e escreve `reviews/123-codex.md`. `AGENT` deve nomear uma instância disponível (veja `--list-agents`). No `--dry-run`, itens cujo agente difere do agente do lote aparecem marcados com `· agent: NOME`.
+
+### Diretório por item
+
+`--path` define o diretório do lote (padrão: o diretório atual). A chave de item `PATH` executa apenas aquele item em outro diretório; assim, cada agente já abre dentro do próprio repositório e carrega os arquivos de projeto dele (no Claude, `CLAUDE.md` e `.claude/`). Um `PATH` relativo é resolvido a partir de `--path`; `~` e caminhos absolutos são usados como estão:
+
+```sh
+agent-batch --template review.md --path ~/projetos --title '{{PATH}} #{{PR}}' \
+  --item PATH=api PR=12 \
+  --item PATH=web PR=34 \
+  --item PATH=~/trabalho/site PR=56
+```
+
+Os itens rodam em `~/projetos/api`, `~/projetos/web` e `~/trabalho/site`. Todos os diretórios precisam existir; caso contrário, nada é iniciado. Assim como `TITLE`, `{{PATH}}` é renderizado com o valor literal do item e só é exigido onde um modelo o usa. No `--dry-run`, itens cujo diretório difere do diretório do lote aparecem marcados com `· path: DIRETÓRIO`.
 
 ## Tipos e instâncias de IA
 

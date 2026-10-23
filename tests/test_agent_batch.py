@@ -23,6 +23,7 @@ import uuid
 SCRIPT = Path(__file__).resolve().parents[1] / "agent-batch"
 MODULE = runpy.run_path(str(SCRIPT))
 AGENTS = {name: {"type": name, "command": [name]} for name in ("claude", "codex")}
+CWD = str(Path.cwd())
 
 
 class ConfigTests(unittest.TestCase):
@@ -148,22 +149,22 @@ class TemplateTests(unittest.TestCase):
         _, jobs = self.prepare("{{ PR_URL }} {{type}} {{TITLE}}", "--prefix", "review",
                                "--item", "PR_URL=a?x=1&y=2", "TYPE={{TITLE}}", "TITLE=one",
                                "--item", "pr_url=b", "type=frontend", "title=two")
-        self.assertEqual(jobs, [("one", "claude", None, "a?x=1&y=2 {{TITLE}} one"),
-                                ("two", "claude", None, "b frontend two")])
+        self.assertEqual(jobs, [("one", "claude", None, "a?x=1&y=2 {{TITLE}} one", CWD),
+                                ("two", "claude", None, "b frontend two", CWD)])
 
     def test_name_templates_render_item_values_and_yield_to_item_keys(self):
         _, jobs = self.prepare("{{PR}}", "--title", "PR {{pr}}", "--session-name",
                                "review {{ PR }} {{TYPE}}",
                                "--item", "PR=1", "TYPE={{PR}}",
                                "--item", "PR=2", "TYPE=api", "TITLE={{PR}}", "SESSION_NAME=own")
-        self.assertEqual(jobs, [("PR 1", "claude", "review 1 {{PR}}", "1"),
-                                ("{{PR}}", "claude", "own", "2")])
+        self.assertEqual(jobs, [("PR 1", "claude", "review 1 {{PR}}", "1", CWD),
+                                ("{{PR}}", "claude", "own", "2", CWD)])
 
     def test_item_session_name_without_templates(self):
         _, jobs = self.prepare("hello", "--item", "SESSION_NAME=-starts with dash",
                                "--item", "TITLE=x")
-        self.assertEqual(jobs, [("task-1", "claude", "-starts with dash", "hello"),
-                                ("x", "claude", None, "hello")])
+        self.assertEqual(jobs, [("task-1", "claude", "-starts with dash", "hello", CWD),
+                                ("x", "claude", None, "hello", CWD)])
 
     def test_item_agent_overrides_batch_agent_and_renders_everywhere(self):
         _, jobs = self.prepare("Write notes/{{PR}}-{{ agent }}.md", "--agent", "codex",
@@ -173,20 +174,45 @@ class TemplateTests(unittest.TestCase):
                                "--item", "PR=2", "AGENT=codex", "SESSION_NAME=own",
                                "--item", "PR=3", "TITLE={{AGENT}}")
         self.assertEqual(jobs, [("PR 1 (claude)", "claude", "claude review",
-                                 "Write notes/1-claude.md"),
-                                ("PR 2 (codex)", "codex", "own", "Write notes/2-codex.md"),
+                                 "Write notes/1-claude.md", CWD),
+                                ("PR 2 (codex)", "codex", "own", "Write notes/2-codex.md", CWD),
                                 ("{{AGENT}}", "codex", "codex review",
-                                 "Write notes/3-codex.md")])
+                                 "Write notes/3-codex.md", CWD)])
 
     def test_shared_values_fill_items_and_yield_to_item_keys(self):
         _, jobs = self.prepare("{{REPO}}#{{PR}} {{type}}", "--var", "repo=org/app",
                                "TYPE=backend", "--title", "{{REPO}} {{PR}}", "--var", "X={{PR}}",
                                "--item", "PR=1",
                                "--item", "PR=2", "type=frontend")
-        self.assertEqual(jobs, [("org/app 1", "claude", None, "org/app#1 backend"),
-                                ("org/app 2", "claude", None, "org/app#2 frontend")])
+        self.assertEqual(jobs, [("org/app 1", "claude", None, "org/app#1 backend", CWD),
+                                ("org/app 2", "claude", None, "org/app#2 frontend", CWD)])
         _, jobs = self.prepare("{{REPO}}", "--var", "REPO=org/app")
-        self.assertEqual(jobs, [("task-1", "claude", None, "org/app")])
+        self.assertEqual(jobs, [("task-1", "claude", None, "org/app", CWD)])
+
+    def test_item_path_overrides_batch_path_relative_to_it(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, HOME=temp):
+            root = Path(temp).resolve()
+            for name in ("api", "web", "site"):
+                (root / name).mkdir()
+            directory, jobs = self.prepare("Review {{PR}}", "--path", str(root),
+                                           "--title", "{{PATH}} #{{PR}}",
+                                           "--item", "PR=1", "path=api",
+                                           "--item", "PR=2", f"PATH={root / 'web'}",
+                                           "--item", "PR=3", "PATH=~/site",
+                                           "--item", "PR=4", "TITLE=root")
+            self.assertEqual(directory, str(root))
+            self.assertEqual(jobs, [("api #1", "claude", None, "Review 1", str(root / "api")),
+                                    (f"{root / 'web'} #2", "claude", None, "Review 2",
+                                     str(root / "web")),
+                                    ("~/site #3", "claude", None, "Review 3", str(root / "site")),
+                                    ("root", "claude", None, "Review 4", str(root))])
+            result = subprocess.run([str(SCRIPT), "hi", "--dry-run", "--path", str(root),
+                                     "--item", "PATH=api", "--item", "PATH=."],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"Directory: {root}\n", result.stdout)
+            self.assertIn(f"[1] task-1 · path: {root / 'api'}\nhi", result.stdout)
+            self.assertIn("[2] task-2\nhi", result.stdout)
 
     def test_template_file_and_default_titles(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -196,8 +222,8 @@ class TemplateTests(unittest.TestCase):
                                       "--prefix", "review", "--item", "URL=a", "TYPE=",
                                       "--item", "URL=b", "TYPE=backend")
             self.assertEqual(path, directory)
-            self.assertEqual(jobs, [("review-1", "claude", None, "Revise a\nTipo: \n"),
-                                    ("review-2", "claude", None, "Revise b\nTipo: backend\n")])
+            self.assertEqual(jobs, [("review-1", "claude", None, "Revise a\nTipo: \n", directory),
+                                    ("review-2", "claude", None, "Revise b\nTipo: backend\n", directory)])
 
     def test_validation_rejects_entire_batch(self):
         cases = [
@@ -219,6 +245,11 @@ class TemplateTests(unittest.TestCase):
             ("hello", "--var", "AGENT=codex"),
             ("hello", "--var", "title=shared"),
             ("hello", "--var", "SESSION_NAME=shared"),
+            ("hello", "--var", "PATH=."),
+            ("hello", "--item", "PATH="),
+            ("hello", "--item", "PATH=a-directory-that-does-not-exist"),
+            ("hello", "--item", f"PATH={SCRIPT}"),
+            ("{{PATH}}", "--item", "TITLE=x"),
             ("hello", "--item", "AGENT="),
             ("hello", "--agent", "unknown"),
             ("hello", "--path", "/a-directory-that-does-not-exist"),
@@ -265,9 +296,9 @@ class InteractiveTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             directory, jobs, templates = MODULE["interactive_batch"](cli, args, AGENTS)
         self.assertEqual(directory, str(Path.cwd()))
-        self.assertEqual(jobs, [("task-1", "claude", None, "Revise one"),
+        self.assertEqual(jobs, [("task-1", "claude", None, "Revise one", CWD),
                                 ("task-2", "claude", None,
-                                 "Revise four\nIssue: https://tracker.example/issues/4")])
+                                 "Revise four\nIssue: https://tracker.example/issues/4", CWD)])
         self.assertEqual(templates, ["Revise {{URL}}", updated])
 
     def test_external_editor_updates_template(self):
@@ -286,11 +317,11 @@ class InteractiveTests(unittest.TestCase):
         with patch("builtins.input", side_effect=["one", "f"]), \
                 contextlib.redirect_stdout(io.StringIO()):
             _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
-        self.assertEqual(jobs, [("PR one", "claude", None, "Review one")])
+        self.assertEqual(jobs, [("PR one", "claude", None, "Review one", CWD)])
         with patch("builtins.input", side_effect=["two", "t", "Special review", "f"]), \
                 contextlib.redirect_stdout(io.StringIO()):
             _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
-        self.assertEqual(jobs, [("Special review", "claude", None, "Review two")])
+        self.assertEqual(jobs, [("Special review", "claude", None, "Review two", CWD)])
 
     def test_agent_menu_overrides_only_current_item(self):
         cli = MODULE["parser"]()
@@ -302,17 +333,17 @@ class InteractiveTests(unittest.TestCase):
         with patch("builtins.input", side_effect=answers), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
-        self.assertEqual(jobs, [("task-1", "claude", "s claude", "Write one-claude.md"),
-                                ("task-2", "claude", "s claude", "Write two-claude.md"),
-                                ("task-3", "claude", "s claude", "Write three-claude.md")])
+        self.assertEqual(jobs, [("task-1", "claude", "s claude", "Write one-claude.md", CWD),
+                                ("task-2", "claude", "s claude", "Write two-claude.md", CWD),
+                                ("task-3", "claude", "s claude", "Write three-claude.md", CWD)])
         self.assertIn("Unknown agent", output.getvalue())
         self.assertIn("Agent codex: Codex cannot set the session name", output.getvalue())
         args = cli.parse_args(["-i", "--agent", "claude", "Write {{NAME}}-{{AGENT}}.md"])
         with patch("builtins.input", side_effect=["one", "g", "codex", "a", "two", "f"]), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
-        self.assertEqual(jobs, [("task-1", "codex", None, "Write one-codex.md"),
-                                ("task-2", "claude", None, "Write two-claude.md")])
+        self.assertEqual(jobs, [("task-1", "codex", None, "Write one-codex.md", CWD),
+                                ("task-2", "claude", None, "Write two-claude.md", CWD)])
         self.assertIn("[1] task-1 · agent: codex\nWrite one-codex.md", output.getvalue())
 
     def test_shared_values_are_not_asked(self):
@@ -322,10 +353,32 @@ class InteractiveTests(unittest.TestCase):
         with patch("builtins.input", side_effect=["1", "a", "2", "r", "3", "f"]), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             _, jobs, templates = MODULE["interactive_batch"](cli, args, AGENTS)
-        self.assertEqual(jobs, [("task-1", "claude", None, "Review org/app#1"),
-                                ("task-2", "claude", None, "Review org/app#3")])
+        self.assertEqual(jobs, [("task-1", "claude", None, "Review org/app#1", CWD),
+                                ("task-2", "claude", None, "Review org/app#3", CWD)])
         self.assertEqual(templates, ["Review {{REPO}}#{{PR}}"] * 2)
         self.assertIn("Shared variables: REPO=org/app", output.getvalue())
+
+    def test_path_menu_and_path_key_are_validated(self):
+        (self.root / "api").mkdir()
+        root = self.root.resolve()
+        cli = MODULE["parser"]()
+        args = cli.parse_args(["-i", "--agent", "claude", "--path", str(root), "Review {{PR}}"])
+        answers = ["1", "p", "missing", "api", "a", "2", "p", "", "f"]
+        with patch("builtins.input", side_effect=answers), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            directory, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
+        self.assertEqual(directory, str(root))
+        self.assertEqual(jobs, [("task-1", "claude", None, "Review 1", str(root / "api")),
+                                ("task-2", "claude", None, "Review 2", str(root))])
+        self.assertIn("Not a directory", output.getvalue())
+        self.assertIn(f"[1] task-1 · path: {root / 'api'}\nReview 1", output.getvalue())
+        args = cli.parse_args(["-i", "--agent", "claude", "--path", str(root), "In {{PATH}}"])
+        with patch("builtins.input", side_effect=["missing", "api", "p", "", "api", "f"]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            _, jobs, _ = MODULE["interactive_batch"](cli, args, AGENTS)
+        self.assertEqual(jobs, [("task-1", "claude", None, "In api", str(root / "api"))])
+        self.assertIn("Invalid value for PATH.", output.getvalue())
+        self.assertIn("PATH is required", output.getvalue())
 
     def test_regular_run_saves_template_and_explicit_interactive_needs_tty(self):
         with patch.object(sys, "argv", [str(SCRIPT), "Review {{URL}}", "--item", "URL=one"]), \
@@ -450,6 +503,19 @@ command = ["claude-work"]
                               [("claude", "work", ["--", "notes-1-claude-work.md"]),
                                ("codex", None, ["--", "notes-2-codex.md"]),
                                ("claude", None, ["--", "notes-3-claude.md"])])
+
+    def test_items_run_in_their_own_directory(self):
+        other = self.root / "other"
+        other.mkdir()
+        for layout in ("window", "pane"):
+            with self.subTest(layout=layout):
+                self.bulk("{{N}}", "--detach", "--layout", layout, "--path", str(self.root),
+                          "--item", "N=1", f"PATH={self.project.name}",
+                          "--item", "N=2", f"PATH={other}", "--item", "N=3")
+        records = self.records(6)
+        self.assertCountEqual([(entry["args"], entry["cwd"]) for entry in records],
+                              [(["--", "1"], str(self.project)), (["--", "2"], str(other)),
+                               (["--", "3"], str(self.root))] * 2)
 
     def test_panes_layouts_and_exact_prompt_quoting(self):
         sentinel = self.root / "must-not-exist"

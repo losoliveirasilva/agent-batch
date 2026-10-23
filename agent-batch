@@ -18,7 +18,7 @@ PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 AGENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
 # Keys with a dedicated batch option; --var cannot share them.
-BATCH_OPTIONS = {"AGENT": "--agent", "TITLE": "--title",
+BATCH_OPTIONS = {"AGENT": "--agent", "PATH": "--path", "TITLE": "--title",
                  "SESSION_NAME": "--session-name"}
 HISTORY_LIMIT = 100
 
@@ -163,6 +163,11 @@ def parser():
     --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \\
     --item PR=123 PR_URL=https://github.com/org/repo/pull/123 AGENT=codex
 
+  agent-batch --template review.txt --path ~/projects --title '{{PATH}} #{{PR}}' \\
+    --item PATH=api PR=12 \\
+    --item PATH=web PR=34 \\
+    --item PATH=~/work/site PR=56
+
 Each --item starts one run. Keys are case-insensitive.
 --var sets values shared by all items; an item's own value takes precedence.
 TITLE names the window/pane and can also appear in the template.
@@ -173,7 +178,8 @@ AGENT runs one item with another instance (default: --agent or default_agent).
 --title and --session-name accept {{KEY}} with each item's variables.
 Without --item, the prompt runs once (with only the --var values).
 Inside tmux, the current session is used; outside, a new session is created and attached.
---path sets the directory for all agents; --template is relative to the caller.
+--path sets the batch directory; --template is relative to the caller.
+PATH runs one item in another directory; a relative PATH is resolved against --path.
 Agents run in your interactive shell ($SHELL), including functions and aliases.
 When an agent exits, the shell stays open so you can review the output.
 Built-in instances: claude and codex. Customize them in
@@ -185,7 +191,8 @@ $XDG_CONFIG_HOME/agent-batch/history.json (or ~/.config/agent-batch/history.json
 While entering an item, choose "edit" to change its prompt in your editor;
 earlier items keep their already reviewed prompts.
 Choose "title" in an item's preview to override its --title/default name,
-or "agent" to run only that item with another instance.
+"agent" to run only that item with another instance, or "path" to run it
+in another directory.
 """,
     )
     cli.add_argument("prompt", nargs="?", help="text with {{KEY}} markers")
@@ -202,7 +209,8 @@ or "agent" to run only that item with another instance.
     cli.add_argument("--var", action="extend", nargs="+", metavar="KEY=VALUE",
                      help="variables shared by all items; an item's value takes precedence")
     cli.add_argument("--path", default=".", metavar="DIRECTORY",
-                     help="agents' working directory (default: current directory)")
+                     help="agents' working directory; an item's PATH takes precedence "
+                          "(default: current directory)")
     cli.add_argument("--layout", choices=("window", "pane"), default="window",
                      help="windows, or panes in a new window (default: window)")
     cli.add_argument("--pane-layout", choices=("even-horizontal", "even-vertical", "tiled"),
@@ -238,16 +246,32 @@ def read_template(cli, args):
     return template
 
 
+def resolve_directory(path, base="."):
+    # A relative path is resolved against base; ~ and absolute paths stand alone.
+    if not path:
+        raise ValueError("the directory cannot be empty")
+    directory = (Path(base).expanduser() / Path(path).expanduser()).resolve(strict=True)
+    if not directory.is_dir():
+        raise NotADirectoryError(f"not a directory: {directory}")
+    return str(directory)
+
+
+def valid_directory(path, base):
+    try:
+        resolve_directory(path, base)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def working_directory(cli, args):
     try:
-        directory = Path(args.path).expanduser().resolve(strict=True)
+        directory = resolve_directory(args.path)
     except (OSError, ValueError) as error:
         cli.error(str(error))
-    if not directory.is_dir():
-        cli.error(f"not a directory: {directory}")
     if not valid_title(args.prefix):
         cli.error("--prefix must be a non-empty name without control characters")
-    return str(directory)
+    return directory
 
 
 def parse_values(cli, assignments, context, duplicate_hint=""):
@@ -280,6 +304,11 @@ def prepare_item(cli, args, agents, template, shared, assignments, number):
     if agent not in agents:
         cli.error(f"item {number}: unknown instance {agent!r} in AGENT; "
                   f"available: {', '.join(agents)}")
+    # PATH selects the item's directory; its value is also literal in {{PATH}}.
+    try:
+        directory = resolve_directory(values.get("PATH", "."), args.path)
+    except (OSError, ValueError) as error:
+        cli.error(f"item {number}: invalid PATH: {error}")
     # Item values are literal; the name templates apply only when they are absent.
     patterns = {key: pattern for key, pattern in (("TITLE", args.title),
                                                    ("SESSION_NAME", args.session_name))
@@ -301,7 +330,7 @@ def prepare_item(cli, args, agents, template, shared, assignments, number):
                   "must be non-empty, without control characters")
     if "\0" in prompt:
         cli.error(f"item {number}: the prompt cannot contain NUL bytes")
-    return title, agent, session_name, prompt
+    return title, agent, session_name, prompt, directory
 
 
 def prepare(cli, args, agents, template=None):
@@ -321,11 +350,12 @@ def agent_command(agents, agent, prompt, session_name):
     return AGENT_TYPES[spec["type"]](spec["command"], prompt, session_name)
 
 
-def job_heading(number, job, default_agent):
-    title, agent, session_name, _ = job
+def job_heading(number, job, default_agent, default_directory):
+    title, agent, session_name, _, directory = job
     agent = f" · agent: {agent}" if agent != default_agent else ""
     session = f" · session: {session_name}" if session_name is not None else ""
-    return f"[{number}] {title}{agent}{session}"
+    path = f" · path: {directory}" if directory != default_directory else ""
+    return f"[{number}] {title}{agent}{session}{path}"
 
 
 def enter_template():
@@ -436,18 +466,19 @@ def interactive_batch(cli, args, agents):
                 if key not in values and key not in shared:
                     while True:
                         value = input(f"{key}: ")
-                        if "\0" in value or (key in ("TITLE", "SESSION_NAME")
-                                               and not valid_title(value)):
+                        if ("\0" in value
+                                or (key in ("TITLE", "SESSION_NAME") and not valid_title(value))
+                                or (key == "PATH" and not valid_directory(value, args.path))):
                             print(f"Invalid value for {key}.")
                             continue
                         values[key] = value
                         break
             assignments = [f"{key}={value}" for key, value in values.items()]
             job = prepare_item(cli, args, agents, template, shared, assignments, number)
-            print(f"\n{job_heading(number, job, args.agent)}\n{job[3]}")
+            print(f"\n{job_heading(number, job, args.agent, directory)}\n{job[3]}")
             finish = "preview" if args.dry_run else "launch"
             action = input(f"[a]dd another item, [f]inish and {finish}, [e]dit prompt, "
-                           "[t]itle, a[g]ent, [r]edo item, [c]ancel [f]: ").strip().lower()
+                           "[t]itle, a[g]ent, [p]ath, [r]edo item, [c]ancel [f]: ").strip().lower()
             if action in ("", "f", "a"):
                 jobs.append(job)
                 templates.append(template)
@@ -488,6 +519,20 @@ def interactive_batch(cli, args, agents):
                         continue
                     values["AGENT"] = agent
                     break
+            elif action == "p":
+                while True:
+                    path = input(f"Directory for this item (blank for batch path {directory}): ")
+                    if not path:
+                        if "PATH" in placeholder_keys(template, args, {}):
+                            print("PATH is required by the prompt or name template.")
+                            continue
+                        values.pop("PATH", None)
+                        break
+                    if not valid_directory(path, args.path):
+                        print("Not a directory; try again.")
+                        continue
+                    values["PATH"] = path
+                    break
             elif action == "r":
                 values = {}
             elif action == "c":
@@ -503,7 +548,7 @@ def tmux(*args):
     return result.stdout.strip()
 
 
-def launch(args, directory, jobs):
+def launch(args, jobs):
     if not shutil.which("tmux"):
         raise RuntimeError("tmux not found in PATH")
     shell = os.environ.get("SHELL") or "/bin/bash"
@@ -522,7 +567,7 @@ def launch(args, directory, jobs):
         if inside:
             target = ["-t", os.environ["TMUX_PANE"]] if os.environ.get("TMUX_PANE") else []
             session = tmux("display-message", "-p", *target, "#{session_id}")
-        for index, (title, _) in enumerate(jobs):
+        for index, (title, directory, _) in enumerate(jobs):
             window_name = args.prefix if args.layout == "pane" else title
             common = ["-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-c", directory]
             if index == 0 and not inside:
@@ -555,7 +600,7 @@ def launch(args, directory, jobs):
                   file=sys.stderr)
         raise
 
-    for pane, (_, invocation) in zip(panes, jobs):
+    for pane, (_, directory, invocation) in zip(panes, jobs):
         # Interactive startup loads the user's shell functions and aliases.
         # Pass the prompt as one quoted argument, never as tmux keystrokes.
         command =(f"cd -- {shlex.quote(directory)} && {shlex.join(invocation)}; "
@@ -606,7 +651,7 @@ def main():
         directory, jobs = prepare(cli, args, agents, template)
         templates = [template]
     invocations = []
-    for number, (_, agent, session_name, prompt) in enumerate(jobs, 1):
+    for number, (_, agent, session_name, prompt, _) in enumerate(jobs, 1):
         try:
             invocations.append(agent_command(agents, agent, prompt, session_name))
         except ValueError as error:
@@ -616,12 +661,12 @@ def main():
               f"Base command: {shlex.join(spec['command'])}\n"
               f"Directory: {directory}\nLayout: {args.layout}")
         for number, job in enumerate(jobs, 1):
-            print(f"\n{job_heading(number, job, args.agent)}\n{job[3]}")
+            print(f"\n{job_heading(number, job, args.agent, directory)}\n{job[3]}")
         return 0
     save_history(cli, templates)
     try:
-        launch(args, directory, [(title, invocation)
-                                 for (title, *_), invocation in zip(jobs, invocations)])
+        launch(args, [(title, job_directory, invocation)
+                      for (title, *_, job_directory), invocation in zip(jobs, invocations)])
     except (OSError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
