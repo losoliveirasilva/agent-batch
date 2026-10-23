@@ -178,6 +178,16 @@ class TemplateTests(unittest.TestCase):
                                 ("{{AGENT}}", "codex", "codex review",
                                  "Write notes/3-codex.md")])
 
+    def test_shared_values_fill_items_and_yield_to_item_keys(self):
+        _, jobs = self.prepare("{{REPO}}#{{PR}} {{type}}", "--var", "repo=org/app",
+                               "TYPE=backend", "--title", "{{REPO}} {{PR}}", "--var", "X={{PR}}",
+                               "--item", "PR=1",
+                               "--item", "PR=2", "type=frontend")
+        self.assertEqual(jobs, [("org/app 1", "claude", None, "org/app#1 backend"),
+                                ("org/app 2", "claude", None, "org/app#2 frontend")])
+        _, jobs = self.prepare("{{REPO}}", "--var", "REPO=org/app")
+        self.assertEqual(jobs, [("task-1", "claude", None, "org/app")])
+
     def test_template_file_and_default_titles(self):
         with tempfile.TemporaryDirectory() as directory:
             template = Path(directory) / "review.txt"
@@ -203,6 +213,12 @@ class TemplateTests(unittest.TestCase):
             ("hello", "--title", "PR {{PR}}", "--item", "PR=1", "--item", "SESSION_NAME=two"),
             ("hello", "--session-name", "{{MISSING}}"),
             ("hello", "--item", "AGENT=unknown"),
+            ("{{URL}} {{TYPE}}", "--var", "TYPE=x", "--item", "TYPE=y"),
+            ("hello", "--var", "A=1", "a=2"),
+            ("hello", "--var", "not-an-assignment"),
+            ("hello", "--var", "AGENT=codex"),
+            ("hello", "--var", "title=shared"),
+            ("hello", "--var", "SESSION_NAME=shared"),
             ("hello", "--item", "AGENT="),
             ("hello", "--agent", "unknown"),
             ("hello", "--path", "/a-directory-that-does-not-exist"),
@@ -298,6 +314,18 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(jobs, [("task-1", "codex", None, "Write one-codex.md"),
                                 ("task-2", "claude", None, "Write two-claude.md")])
         self.assertIn("[1] task-1 · agent: codex\nWrite one-codex.md", output.getvalue())
+
+    def test_shared_values_are_not_asked(self):
+        cli = MODULE["parser"]()
+        args = cli.parse_args(["-i", "--agent", "claude", "Review {{REPO}}#{{PR}}",
+                               "--var", "REPO=org/app"])
+        with patch("builtins.input", side_effect=["1", "a", "2", "r", "3", "f"]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            _, jobs, templates = MODULE["interactive_batch"](cli, args, AGENTS)
+        self.assertEqual(jobs, [("task-1", "claude", None, "Review org/app#1"),
+                                ("task-2", "claude", None, "Review org/app#3")])
+        self.assertEqual(templates, ["Review {{REPO}}#{{PR}}"] * 2)
+        self.assertIn("Shared variables: REPO=org/app", output.getvalue())
 
     def test_regular_run_saves_template_and_explicit_interactive_needs_tty(self):
         with patch.object(sys, "argv", [str(SCRIPT), "Review {{URL}}", "--item", "URL=one"]), \

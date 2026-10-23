@@ -24,13 +24,26 @@ agent-batch 'Review {{PR_URL}} with a focus on {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `AGENT` runs one item with another agent instance (see [Agent per item](#agent-per-item)). `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents.
+Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `AGENT` runs one item with another agent instance (see [Agent per item](#agent-per-item)). `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents. `--var` sets values shared by every item (see [Shared variables](#shared-variables)).
+
+### Shared variables
+
+Use `--var` for values that are the same in every item, instead of repeating them in each `--item`. An item's own value takes precedence, so `--var` also works as a default:
+
+```sh
+agent-batch 'Review {{PR_URL}} in {{REPO}} with a focus on {{TYPE}}' \
+  --var REPO=org/repo TYPE=backend \
+  --item PR_URL=https://github.com/org/repo/pull/123 \
+  --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
+```
+
+Both items use `REPO=org/repo`; the first uses `TYPE=backend`, and the second overrides it with `frontend`. Shared values also fill `{{KEY}}` in `--title` and `--session-name`, and are literal like item values. List several pairs after `--var` or repeat it. Like `--item`, it takes every following argument, so write the prompt before it. `AGENT`, `TITLE`, and `SESSION_NAME` cannot be shared; use `--agent`, `--title`, and `--session-name`. Without `--item`, the prompt runs once with the shared values.
 
 ### Interactive mode and prompt history
 
-Run `agent-batch` without arguments in a terminal to select a saved prompt or create one. You can also start with a specific prompt or file: `agent-batch -i 'Review {{PR_URL}}'` or `agent-batch -i --template review.txt`. The program asks for each `{{KEY}}` value and previews the rendered prompt. From the same menu, you can add another item, edit the prompt, override that item's window/pane title with `t`, run that item with another agent instance with `g`, redo the item, or finish and launch the batch. Titles use `--title` or the usual `task-1`, `task-2` defaults unless overridden. `--agent`, `--path`, `--layout`, `--detach`, and `--dry-run` also work in this mode.
+Run `agent-batch` without arguments in a terminal to select a saved prompt or create one. You can also start with a specific prompt or file: `agent-batch -i 'Review {{PR_URL}}'` or `agent-batch -i --template review.txt`. The program asks for each `{{KEY}}` value and previews the rendered prompt. From the same menu, you can add another item, edit the prompt, override that item's window/pane title with `t`, run that item with another agent instance with `g`, redo the item, or finish and launch the batch. Titles use `--title` or the usual `task-1`, `task-2` defaults unless overridden. `--agent`, `--path`, `--layout`, `--var`, `--detach`, and `--dry-run` also work in this mode; shared keys are not asked for.
 
-The batch agent, path, and layout are shown immediately, without another question. To change them, press `Ctrl-C` and rerun with the indicated options. Choosing `finish and launch` at the last item's preview starts the batch without another confirmation.
+The batch agent, path, layout, and shared variables are shown immediately, without another question. To change them, press `Ctrl-C` and rerun with the indicated options. Choosing `finish and launch` at the last item's preview starts the batch without another confirmation.
 
 When entering a new prompt in the terminal, finish with a line containing only `.`. At the prompt picker, type `/text` to search history. History stores **templates**, without filled item values, in `~/.config/agent-batch/history.json` (or `$XDG_CONFIG_HOME/agent-batch/history.json`). Traditional command-line runs also add to this history; `--dry-run` does not. The file is outside the repository.
 

@@ -24,13 +24,26 @@ agent-batch 'Revise {{PR_URL}} considerando {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `AGENT` executa um item com outra instância de IA (veja [Agente por item](#agente-por-item)). `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs.
+Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `AGENT` executa um item com outra instância de IA (veja [Agente por item](#agente-por-item)). `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs. `--var` define valores compartilhados por todos os itens (veja [Variáveis compartilhadas](#variáveis-compartilhadas)).
+
+### Variáveis compartilhadas
+
+Use `--var` para valores iguais em todos os itens, em vez de repeti-los em cada `--item`. O valor definido no próprio item tem prioridade; assim, `--var` também funciona como padrão:
+
+```sh
+agent-batch 'Revise {{PR_URL}} em {{REPO}} considerando {{TYPE}}' \
+  --var REPO=org/repo TYPE=backend \
+  --item PR_URL=https://github.com/org/repo/pull/123 \
+  --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
+```
+
+Os dois itens usam `REPO=org/repo`; o primeiro usa `TYPE=backend`, e o segundo o substitui por `frontend`. Os valores compartilhados também preenchem `{{CHAVE}}` em `--title` e `--session-name` e são literais, como os valores de item. Liste vários pares após `--var` ou repita a opção. Assim como `--item`, ela consome todos os argumentos seguintes; por isso, escreva o prompt antes dela. `AGENT`, `TITLE` e `SESSION_NAME` não podem ser compartilhados; use `--agent`, `--title` e `--session-name`. Sem `--item`, o prompt roda uma vez com os valores compartilhados.
 
 ### Modo interativo e histórico
 
-Execute `agent-batch` sem argumentos em um terminal para escolher um prompt salvo ou criar outro. Também é possível começar com um prompt ou arquivo específico: `agent-batch -i 'Revise {{PR_URL}}'` ou `agent-batch -i --template review.txt`. O programa pergunta o valor de cada marcador `{{CHAVE}}` e mostra o prompt montado. No mesmo menu, você pode adicionar outro item, editar o prompt, definir um título específico com `t`, executar aquele item com outra instância de IA com `g`, refazer o item ou terminar e iniciar o lote. Sem essa escolha, o título vem de `--title` ou do padrão `task-1`, `task-2` etc. `--agent`, `--path`, `--layout`, `--detach` e `--dry-run` continuam disponíveis nesse modo.
+Execute `agent-batch` sem argumentos em um terminal para escolher um prompt salvo ou criar outro. Também é possível começar com um prompt ou arquivo específico: `agent-batch -i 'Revise {{PR_URL}}'` ou `agent-batch -i --template review.txt`. O programa pergunta o valor de cada marcador `{{CHAVE}}` e mostra o prompt montado. No mesmo menu, você pode adicionar outro item, editar o prompt, definir um título específico com `t`, executar aquele item com outra instância de IA com `g`, refazer o item ou terminar e iniciar o lote. Sem essa escolha, o título vem de `--title` ou do padrão `task-1`, `task-2` etc. `--agent`, `--path`, `--layout`, `--var`, `--detach` e `--dry-run` continuam disponíveis nesse modo; as chaves compartilhadas não são perguntadas.
 
-O agente do lote, o caminho e o layout aparecem logo na abertura, sem uma pergunta adicional. Para alterá-los, cancele com `Ctrl-C` e execute novamente usando as opções indicadas. As mensagens exibidas pelo CLI são em inglês; escolher `finish and launch` na prévia do último item inicia o lote, sem outra confirmação.
+O agente do lote, o caminho, o layout e as variáveis compartilhadas aparecem logo na abertura, sem uma pergunta adicional. Para alterá-los, cancele com `Ctrl-C` e execute novamente usando as opções indicadas. As mensagens exibidas pelo CLI são em inglês; escolher `finish and launch` na prévia do último item inicia o lote, sem outra confirmação.
 
 Ao criar um prompt no terminal, termine a entrada com uma linha contendo apenas `.`. Para buscar no histórico, digite `/texto` na escolha do prompt. O histórico guarda os **modelos**, sem os valores preenchidos, em `~/.config/agent-batch/history.json` (ou `$XDG_CONFIG_HOME/agent-batch/history.json`). Execuções feitas com os argumentos tradicionais também alimentam esse histórico; `--dry-run` não o altera. O arquivo fica fora do repositório.
 

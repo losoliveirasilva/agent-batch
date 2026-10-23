@@ -17,6 +17,9 @@ import tomllib
 PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 AGENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+# Keys with a dedicated batch option; --var cannot share them.
+BATCH_OPTIONS = {"AGENT": "--agent", "TITLE": "--title",
+                 "SESSION_NAME": "--session-name"}
 HISTORY_LIMIT = 100
 
 
@@ -151,19 +154,24 @@ def parser():
     --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \\
     --item PR=124 PR_URL=https://github.com/org/repo/pull/124 SESSION_NAME=urgent
 
+  agent-batch 'Review {{PR_URL}} in {{REPO}} ({{TYPE}})' --var REPO=org/repo TYPE=backend \\
+    --item PR_URL=https://github.com/org/repo/pull/123 \\
+    --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
+
   agent-batch 'Review {{PR_URL}}; write the findings to reviews/{{PR}}-{{AGENT}}.md' \\
     --agent claude --title 'PR {{PR}} ({{AGENT}})' \\
     --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \\
     --item PR=123 PR_URL=https://github.com/org/repo/pull/123 AGENT=codex
 
 Each --item starts one run. Keys are case-insensitive.
+--var sets values shared by all items; an item's own value takes precedence.
 TITLE names the window/pane and can also appear in the template.
 Without TITLE, --title is used; without both, names are PREFIX-1, PREFIX-2, etc.
 SESSION_NAME (or --session-name) names the agent session; Codex does not support it.
 AGENT runs one item with another instance (default: --agent or default_agent).
 {{AGENT}} always renders the item's instance name; it is never asked or required.
 --title and --session-name accept {{KEY}} with each item's variables.
-Without --item, the prompt runs once (with no variables).
+Without --item, the prompt runs once (with only the --var values).
 Inside tmux, the current session is used; outside, a new session is created and attached.
 --path sets the directory for all agents; --template is relative to the caller.
 Agents run in your interactive shell ($SHELL), including functions and aliases.
@@ -191,6 +199,8 @@ or "agent" to run only that item with another instance.
     cli.add_argument("--list-agents", action="store_true", help="list instances, types, and commands")
     cli.add_argument("--item", action="append", nargs="+", metavar="KEY=VALUE",
                      help="variables for one run; repeat for each item")
+    cli.add_argument("--var", action="extend", nargs="+", metavar="KEY=VALUE",
+                     help="variables shared by all items; an item's value takes precedence")
     cli.add_argument("--path", default=".", metavar="DIRECTORY",
                      help="agents' working directory (default: current directory)")
     cli.add_argument("--layout", choices=("window", "pane"), default="window",
@@ -240,16 +250,31 @@ def working_directory(cli, args):
     return str(directory)
 
 
-def prepare_item(cli, args, agents, template, assignments, number):
+def parse_values(cli, assignments, context, duplicate_hint=""):
     values = {}
     for assignment in assignments:
         key, separator, value = assignment.partition("=")
         if not separator or not KEY.fullmatch(key):
-            cli.error(f"item {number}: expected KEY=VALUE, got {assignment!r}")
+            cli.error(f"{context}: expected KEY=VALUE, got {assignment!r}")
         key = key.upper()
         if key in values:
-            cli.error(f"item {number}: duplicate key {key}; use --item for another item")
+            cli.error(f"{context}: duplicate key {key}{duplicate_hint}")
         values[key] = value
+    return values
+
+
+def shared_values(cli, args):
+    values = parse_values(cli, args.var or [], "--var")
+    for key, option in BATCH_OPTIONS.items():
+        if key in values:
+            cli.error(f"--var: {key} cannot be shared; use {option}")
+    return values
+
+
+def prepare_item(cli, args, agents, template, shared, assignments, number):
+    # Shared values fill keys the item does not set itself.
+    values = shared | parse_values(cli, assignments, f"item {number}",
+                                   "; use --item for another item")
     # AGENT selects the item's instance and is always available as {{AGENT}}.
     agent = values.setdefault("AGENT", args.agent)
     if agent not in agents:
@@ -285,7 +310,8 @@ def prepare(cli, args, agents, template=None):
     if template is None:
         template = read_template(cli, args)
     directory = working_directory(cli, args)
-    jobs = [prepare_item(cli, args, agents, template, assignments, number)
+    shared = shared_values(cli, args)
+    jobs = [prepare_item(cli, args, agents, template, shared, assignments, number)
             for number, assignments in enumerate(args.item or [[]], 1)]
     return directory, jobs
 
@@ -389,10 +415,14 @@ def interactive_batch(cli, args, agents):
     if args.prompt is not None and args.template is not None:
         cli.error("provide a prompt OR --template FILE")
     directory = working_directory(cli, args)
+    shared = shared_values(cli, args)
     print(f"Agent: {args.agent}\nPath: {directory}\nLayout: {args.layout}")
     if args.layout == "pane":
         print(f"Pane layout: {args.pane_layout}")
-    print("To change these, press Ctrl-C and rerun with --agent, --path, or --layout.")
+    if shared:
+        print("Shared variables: " + ", ".join(f"{key}={value}"
+                                               for key, value in shared.items()))
+    print("To change these, press Ctrl-C and rerun with --agent, --path, --layout, or --var.")
     template = (read_template(cli, args) if args.prompt is not None or args.template is not None
                 else choose_template(cli))
     jobs = []
@@ -403,7 +433,7 @@ def interactive_batch(cli, args, agents):
         while True:
             print(f"\nItem {number}:")
             for key in placeholder_keys(template, args, values):
-                if key not in values:
+                if key not in values and key not in shared:
                     while True:
                         value = input(f"{key}: ")
                         if "\0" in value or (key in ("TITLE", "SESSION_NAME")
@@ -413,7 +443,7 @@ def interactive_batch(cli, args, agents):
                         values[key] = value
                         break
             assignments = [f"{key}={value}" for key, value in values.items()]
-            job = prepare_item(cli, args, agents, template, assignments, number)
+            job = prepare_item(cli, args, agents, template, shared, assignments, number)
             print(f"\n{job_heading(number, job, args.agent)}\n{job[3]}")
             finish = "preview" if args.dry_run else "launch"
             action = input(f"[a]dd another item, [f]inish and {finish}, [e]dit prompt, "
