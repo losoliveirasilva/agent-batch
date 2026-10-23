@@ -2,7 +2,7 @@
 
 🌐 Languages: [🇺🇸 English](README.md) | [🇧🇷 Português (Brasil)](README.pt-BR.md)
 
-Run batches of prompts in tmux windows or panes. Requires Python 3.11+, tmux, and the AI CLIs you want to use. Uses your interactive `$SHELL`, including functions and aliases (bash, zsh, or another POSIX shell).
+Run batches of prompts in tmux windows or panes, or as [agent-manager](https://github.com/YoanWai/agent-manager) sessions. Requires Python 3.11+, tmux, and the AI CLIs you want to use. Uses your interactive `$SHELL`, including functions and aliases (bash, zsh, or another POSIX shell).
 
 ## Local installation
 
@@ -91,6 +91,21 @@ agent-batch --template review.md --path ~/projects --title '{{PATH}} #{{PR}}' \
 ```
 
 The items run in `~/projects/api`, `~/projects/web`, and `~/work/site`. Every directory must exist; otherwise, nothing starts. Like `TITLE`, `{{PATH}}` renders the item's literal value and is required only where a template uses it. `--dry-run` marks items whose directory differs from the batch directory with `· path: DIRECTORY`.
+
+### agent-manager
+
+With `--backend agent-manager`, each item becomes an [agent-manager](https://github.com/YoanWai/agent-manager) session instead of a tmux window, so the batch shows up in agent-manager's list with live status, revive, and diff review. Templates, `--var`, `AGENT`, `PATH`, history, interactive mode, and `--dry-run` work as usual:
+
+```sh
+agent-batch 'Review {{PR_URL}}' --backend agent-manager --agent claude \
+  --path ~/projects/api --title 'PR {{PR}}' \
+  --item PR=12 PR_URL=https://github.com/org/repo/pull/12 \
+  --item PR=13 PR_URL=https://github.com/org/repo/pull/13
+```
+
+Each item runs `agent-manager spawn --tool TYPE --directory DIRECTORY --name TITLE --prompt PROMPT`. The title (`TITLE`, `--title`, or `PREFIX-N`) names the session in agent-manager, for Codex too. agent-manager does not pass a session name to the agent, so `SESSION_NAME` and `--session-name` are rejected, and `--layout` and `--pane-layout` do not apply. Sessions are filed under agent-manager's root group (or the calling session's group, when run inside agent-manager).
+
+agent-manager launches its own built-in `claude` and `codex`, with the environment of its tmux server, not of your shell. Only instances whose command is just the type name (the built-in `claude` and `codex`) can run there; an instance backed by a shell function, an alias, or fixed arguments, such as `claude-work`, is rejected before any session is created. Items are created in order; if agent-manager fails on one, the batch stops and reports how many sessions were already created.
 
 ## Agent types and instances
 

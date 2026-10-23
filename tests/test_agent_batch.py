@@ -137,6 +137,37 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("item 2: instance codex:", result.stderr)
 
+    def test_agent_manager_spawns_builtin_tool_with_attached_options(self):
+        self.assertEqual(MODULE["manager_command"](AGENTS, "codex", "-t", "-p", None, "/d"),
+                         ["agent-manager", "spawn", "--tool=codex", "--directory=/d",
+                          "--name=-t", "--prompt=-p"])
+        agents = dict(AGENTS, work={"type": "claude", "command": ["claude-work"]},
+                      flagged={"type": "codex", "command": ["codex", "--profile", "work"]})
+        for agent, session_name in (("work", None), ("flagged", None), ("claude", "s")):
+            with self.subTest(agent=agent), self.assertRaises(ValueError):
+                MODULE["manager_command"](agents, agent, "t", "p", session_name, "/d")
+
+    def test_cli_agent_manager_backend_validates_before_running(self):
+        backend = [str(SCRIPT), "hello", "--backend", "agent-manager", "--dry-run"]
+        result = subprocess.run([*backend, "--agent", "codex", "--title", "PR {{N}}",
+                                 "--item", "N=1"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Backend: agent-manager\n\n[1] PR 1\nhello", result.stdout)
+        for arguments in (("--layout", "window"), ("--pane-layout", "tiled"),
+                          ("--session-name", "s"), ("--item", "SESSION_NAME=s")):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([*backend, "--agent", "claude", *arguments],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.toml"
+            config.write_text('[agents.work]\ntype = "claude"\ncommand = ["claude-work"]\n')
+            result = subprocess.run([*backend, "--config", str(config), "--agent", "work"],
+                                    capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("item 1: instance work: agent-manager runs its built-in claude CLI",
+                      result.stderr)
+
 
 class TemplateTests(unittest.TestCase):
     def prepare(self, *arguments):
@@ -346,6 +377,20 @@ class InteractiveTests(unittest.TestCase):
                                 ("task-2", "claude", None, "Write two-claude.md", CWD)])
         self.assertIn("[1] task-1 · agent: codex\nWrite one-codex.md", output.getvalue())
 
+    def test_agent_manager_rejects_custom_batch_agent_before_asking(self):
+        cli = MODULE["parser"]()
+        args = cli.parse_args(["-i", "--backend", "agent-manager", "--agent", "work",
+                               "Review {{URL}}"])
+        agents = dict(AGENTS, work={"type": "claude", "command": ["claude-work"]})
+        with patch("builtins.input", side_effect=AssertionError("asked for input")), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as errors, \
+                self.assertRaises(SystemExit) as error:
+            MODULE["interactive_batch"](cli, args, agents)
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("instance work: agent-manager runs its built-in claude CLI",
+                      errors.getvalue())
+
     def test_shared_values_are_not_asked(self):
         cli = MODULE["parser"]()
         args = cli.parse_args(["-i", "--agent", "claude", "Review {{REPO}}#{{PR}}",
@@ -405,6 +450,69 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn(f"Agent: claude\nPath: {Path.cwd()}\nLayout: window", output.getvalue())
         self.assertIn("Revise https://example.test/pr/1", output.getvalue())
         self.assertFalse((self.root / "agent-batch/history.json").exists())
+
+
+class AgentManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="agent-batch-manager-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.log = self.root / "spawn.log"
+        fake_manager = self.bin / "agent-manager"
+        fake_manager.write_text('''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["BULK_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+if "--name=fail" in sys.argv:
+    sys.exit("spawn failed")
+''')
+        fake_manager.chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.root), XDG_CONFIG_HOME=str(self.root),
+                        PATH=f"{self.bin}:{os.environ['PATH']}", BULK_LOG=str(self.log))
+
+    def bulk(self, *arguments, env=None):
+        return subprocess.run([sys.executable, str(SCRIPT), "--backend", "agent-manager",
+                               "--agent", "claude", *arguments],
+                              env=env or self.env, text=True, capture_output=True)
+
+    def spawns(self):
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+
+    def test_spawns_one_session_per_item(self):
+        (self.root / "api").mkdir()
+        value = "-quoted 'value' $HOME\nline 2"
+        result = self.bulk("{{TEXT}}", "--path", str(self.root), "--title", "PR {{N}}",
+                           "--item", "N=1", f"TEXT={value}", "PATH=api",
+                           "--item", "N=2", "TEXT=two", "AGENT=codex")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.spawns(), [
+            ["spawn", "--tool=claude", f"--directory={self.root / 'api'}", "--name=PR 1",
+             f"--prompt={value}"],
+            ["spawn", "--tool=codex", f"--directory={self.root}", "--name=PR 2",
+             "--prompt=two"],
+        ])
+
+    def test_stops_at_the_first_failed_spawn(self):
+        result = self.bulk("hello", "--item", "TITLE=one", "--item", "TITLE=fail",
+                           "--item", "TITLE=three")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("spawn failed", result.stderr)
+        self.assertIn("could not create item 2 (fail); 1 of 3 run(s) were created",
+                      result.stderr)
+        self.assertEqual([arguments[3] for arguments in self.spawns()],
+                         ["--name=one", "--name=fail"])
+
+    def test_missing_agent_manager_and_dry_run_spawn_nothing(self):
+        result = self.bulk("hello", env=dict(self.env, PATH=str(self.root)))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("agent-manager not found in PATH", result.stderr)
+        result = self.bulk("hello", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.spawns(), [])
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux not installed")

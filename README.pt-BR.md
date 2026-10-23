@@ -2,7 +2,7 @@
 
 🌐 Idiomas: [🇺🇸 English](README.md) | [🇧🇷 Português (Brasil)](README.pt-BR.md)
 
-Executa lotes de prompts em janelas ou painéis do tmux. Requer Python 3.11+, tmux e as CLIs das IAs que você pretende usar. Usa o shell interativo de `$SHELL`, incluindo funções e aliases (bash, zsh ou outro shell POSIX).
+Executa lotes de prompts em janelas ou painéis do tmux, ou como sessões do [agent-manager](https://github.com/YoanWai/agent-manager). Requer Python 3.11+, tmux e as CLIs das IAs que você pretende usar. Usa o shell interativo de `$SHELL`, incluindo funções e aliases (bash, zsh ou outro shell POSIX).
 
 ## Instalação local
 
@@ -91,6 +91,21 @@ agent-batch --template review.md --path ~/projetos --title '{{PATH}} #{{PR}}' \
 ```
 
 Os itens rodam em `~/projetos/api`, `~/projetos/web` e `~/trabalho/site`. Todos os diretórios precisam existir; caso contrário, nada é iniciado. Assim como `TITLE`, `{{PATH}}` é renderizado com o valor literal do item e só é exigido onde um modelo o usa. No `--dry-run`, itens cujo diretório difere do diretório do lote aparecem marcados com `· path: DIRETÓRIO`.
+
+### agent-manager
+
+Com `--backend agent-manager`, cada item vira uma sessão do [agent-manager](https://github.com/YoanWai/agent-manager) em vez de uma janela do tmux; assim, o lote aparece na lista do agent-manager, com status ao vivo, revive e revisão de diff. Modelos, `--var`, `AGENT`, `PATH`, histórico, modo interativo e `--dry-run` funcionam normalmente:
+
+```sh
+agent-batch 'Revise {{PR_URL}}' --backend agent-manager --agent claude \
+  --path ~/projetos/api --title 'PR {{PR}}' \
+  --item PR=12 PR_URL=https://github.com/org/repo/pull/12 \
+  --item PR=13 PR_URL=https://github.com/org/repo/pull/13
+```
+
+Cada item executa `agent-manager spawn --tool TIPO --directory DIRETÓRIO --name TÍTULO --prompt PROMPT`. O título (`TITLE`, `--title` ou `PREFIXO-N`) nomeia a sessão no agent-manager, inclusive no Codex. O agent-manager não repassa um nome de sessão para a IA; por isso, `SESSION_NAME` e `--session-name` são rejeitados, e `--layout` e `--pane-layout` não se aplicam. As sessões ficam no grupo raiz do agent-manager (ou no grupo da sessão que chamou, quando executado dentro do agent-manager).
+
+O agent-manager inicia os próprios `claude` e `codex` embutidos, com o ambiente do servidor tmux dele, e não o do seu shell. Só funcionam instâncias cujo comando é apenas o nome do tipo (as embutidas `claude` e `codex`); uma instância baseada em função do shell, alias ou argumentos fixos, como `claude-work`, é rejeitada antes de qualquer sessão ser criada. Os itens são criados em ordem; se o agent-manager falhar em um deles, o lote para e informa quantas sessões já foram criadas.
 
 ## Tipos e instâncias de IA
 

@@ -88,6 +88,26 @@ def codex_command(command, prompt, session_name=None):
 AGENT_TYPES = {"claude": claude_command, "codex": codex_command}
 
 
+def manager_tool(spec):
+    # agent-manager launches its own built-in CLIs, so an instance maps to one
+    # only when it runs the plain type command: no function, alias, or arguments.
+    if spec["command"] != [spec["type"]]:
+        raise ValueError(f"agent-manager runs its built-in {spec['type']} CLI and cannot run "
+                         f"{shlex.join(spec['command'])}; use --backend tmux, or an instance "
+                         f"whose command is just {spec['type']}")
+    return spec["type"]
+
+
+def manager_command(agents, agent, title, prompt, session_name, directory):
+    tool = manager_tool(agents[agent])
+    if session_name is not None:
+        raise ValueError("agent-manager cannot set the agent's session name; remove "
+                         "SESSION_NAME (the title names the session there)")
+    # The attached forms keep values starting with "-" from reading as options.
+    return ["agent-manager", "spawn", f"--tool={tool}", f"--directory={directory}",
+            f"--name={title}", f"--prompt={prompt}"]
+
+
 def load_agents(cli, config_path):
     agents = {name: {"type": name, "command": [name]} for name in AGENT_TYPES}
     config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
@@ -138,7 +158,7 @@ def load_agents(cli, config_path):
 
 def parser():
     cli = argparse.ArgumentParser(
-        description="Run a batch of prompts in tmux windows or panes.",
+        description="Run a batch of prompts in tmux windows or panes, or in agent-manager.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   agent-batch 'Review {{PR_URL}} ({{type}})' \\
@@ -168,6 +188,11 @@ def parser():
     --item PATH=web PR=34 \\
     --item PATH=~/work/site PR=56
 
+  agent-batch 'Review {{PR_URL}}' --backend agent-manager --agent claude \\
+    --path ~/projects/api --title 'PR {{PR}}' \\
+    --item PR=12 PR_URL=https://github.com/org/repo/pull/12 \\
+    --item PR=13 PR_URL=https://github.com/org/repo/pull/13
+
 Each --item starts one run. Keys are case-insensitive.
 --var sets values shared by all items; an item's own value takes precedence.
 TITLE names the window/pane and can also appear in the template.
@@ -178,6 +203,10 @@ AGENT runs one item with another instance (default: --agent or default_agent).
 --title and --session-name accept {{KEY}} with each item's variables.
 Without --item, the prompt runs once (with only the --var values).
 Inside tmux, the current session is used; outside, a new session is created and attached.
+--backend agent-manager creates each run with "agent-manager spawn" instead, so it
+appears in agent-manager's list; the title names the session there. agent-manager
+runs its built-in CLIs, so only instances whose command is just claude or codex
+work, and --layout, --pane-layout, and session names do not apply.
 --path sets the batch directory; --template is relative to the caller.
 PATH runs one item in another directory; a relative PATH is resolved against --path.
 Agents run in your interactive shell ($SHELL), including functions and aliases.
@@ -211,10 +240,12 @@ in another directory.
     cli.add_argument("--path", default=".", metavar="DIRECTORY",
                      help="agents' working directory; an item's PATH takes precedence "
                           "(default: current directory)")
-    cli.add_argument("--layout", choices=("window", "pane"), default="window",
+    cli.add_argument("--backend", choices=("tmux", "agent-manager"), default="tmux",
+                     help="open tmux windows/panes, or agent-manager sessions (default: tmux)")
+    # The tmux options default later, so agent-manager can reject explicit ones.
+    cli.add_argument("--layout", choices=("window", "pane"),
                      help="windows, or panes in a new window (default: window)")
     cli.add_argument("--pane-layout", choices=("even-horizontal", "even-vertical", "tiled"),
-                     default="even-horizontal",
                      help="side by side, stacked, or grid (default: even-horizontal)")
     cli.add_argument("--prefix", default="task", help="name prefix (default: task)")
     cli.add_argument("--title", metavar="TEMPLATE",
@@ -345,9 +376,26 @@ def prepare(cli, args, agents, template=None):
     return directory, jobs
 
 
+def check_backend(cli, args):
+    if args.backend == "agent-manager":
+        for option, value in (("--layout", args.layout), ("--pane-layout", args.pane_layout),
+                              ("--session-name", args.session_name)):
+            if value is not None:
+                cli.error(f"{option} applies only to --backend tmux")
+    args.layout = args.layout or "window"
+    args.pane_layout = args.pane_layout or "even-horizontal"
+
+
 def agent_command(agents, agent, prompt, session_name):
     spec = agents[agent]
     return AGENT_TYPES[spec["type"]](spec["command"], prompt, session_name)
+
+
+def job_command(args, agents, job):
+    title, agent, session_name, prompt, directory = job
+    if args.backend == "agent-manager":
+        return manager_command(agents, agent, title, prompt, session_name, directory)
+    return agent_command(agents, agent, prompt, session_name)
 
 
 def job_heading(number, job, default_agent, default_directory):
@@ -446,13 +494,24 @@ def interactive_batch(cli, args, agents):
         cli.error("provide a prompt OR --template FILE")
     directory = working_directory(cli, args)
     shared = shared_values(cli, args)
-    print(f"Agent: {args.agent}\nPath: {directory}\nLayout: {args.layout}")
-    if args.layout == "pane":
-        print(f"Pane layout: {args.pane_layout}")
+    if args.backend == "agent-manager":
+        # Items default to the batch agent, so reject it before asking for them.
+        try:
+            manager_tool(agents[args.agent])
+        except ValueError as error:
+            cli.error(f"instance {args.agent}: {error}")
+    print(f"Agent: {args.agent}\nPath: {directory}")
+    if args.backend == "agent-manager":
+        print("Backend: agent-manager")
+    else:
+        print(f"Layout: {args.layout}")
+        if args.layout == "pane":
+            print(f"Pane layout: {args.pane_layout}")
     if shared:
         print("Shared variables: " + ", ".join(f"{key}={value}"
                                                for key, value in shared.items()))
-    print("To change these, press Ctrl-C and rerun with --agent, --path, --layout, or --var.")
+    print("To change these, press Ctrl-C and rerun with --agent, --path, --backend, "
+          "--layout, or --var.")
     template = (read_template(cli, args) if args.prompt is not None or args.template is not None
                 else choose_template(cli))
     jobs = []
@@ -513,7 +572,7 @@ def interactive_batch(cli, args, agents):
                         print("Unknown agent; try again.")
                         continue
                     try:
-                        agent_command(agents, agent, job[3], job[2])
+                        job_command(args, agents, (job[0], agent, *job[2:]))
                     except ValueError as error:
                         print(f"Agent {agent}: {error}")
                         continue
@@ -619,6 +678,16 @@ def launch(args, jobs):
             raise RuntimeError(f"could not attach to session {session}; it is still available")
 
 
+def spawn(jobs):
+    if not shutil.which("agent-manager"):
+        raise RuntimeError("agent-manager not found in PATH")
+    for number, (title, command) in enumerate(jobs, 1):
+        # agent-manager reports each created session, or why it failed.
+        if subprocess.run(command).returncode:
+            raise RuntimeError(f"agent-manager could not create item {number} ({title}); "
+                               f"{number - 1} of {len(jobs)} run(s) were created")
+
+
 def main():
     cli = parser()
     args = cli.parse_args()
@@ -632,6 +701,7 @@ def main():
     if args.agent not in agents:
         cli.error(f"unknown instance: {args.agent!r}; available: {', '.join(agents)}")
     spec = agents[args.agent]
+    check_backend(cli, args)
     interactive = (args.interactive or (args.prompt is None and args.template is None
                                        and args.item is None and sys.stdin.isatty()))
     if interactive:
@@ -651,22 +721,27 @@ def main():
         directory, jobs = prepare(cli, args, agents, template)
         templates = [template]
     invocations = []
-    for number, (_, agent, session_name, prompt, _) in enumerate(jobs, 1):
+    for number, job in enumerate(jobs, 1):
         try:
-            invocations.append(agent_command(agents, agent, prompt, session_name))
+            invocations.append(job_command(args, agents, job))
         except ValueError as error:
-            cli.error(f"item {number}: instance {agent}: {error}")
+            cli.error(f"item {number}: instance {job[1]}: {error}")
     if args.dry_run:
+        target = (f"Layout: {args.layout}" if args.backend == "tmux"
+                  else "Backend: agent-manager")
         print(f"Agent: {args.agent} (type: {spec['type']})\n"
               f"Base command: {shlex.join(spec['command'])}\n"
-              f"Directory: {directory}\nLayout: {args.layout}")
+              f"Directory: {directory}\n{target}")
         for number, job in enumerate(jobs, 1):
             print(f"\n{job_heading(number, job, args.agent, directory)}\n{job[3]}")
         return 0
     save_history(cli, templates)
     try:
-        launch(args, [(title, job_directory, invocation)
-                      for (title, *_, job_directory), invocation in zip(jobs, invocations)])
+        if args.backend == "agent-manager":
+            spawn([(title, invocation) for (title, *_), invocation in zip(jobs, invocations)])
+        else:
+            launch(args, [(title, job_directory, invocation)
+                          for (title, *_, job_directory), invocation in zip(jobs, invocations)])
     except (OSError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
