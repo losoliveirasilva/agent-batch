@@ -178,6 +178,9 @@ def parser():
     --item PR_URL=https://github.com/org/repo/pull/123 \\
     --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 
+  agent-batch 'Review PR {{PR}} in {{REPO}}' --var REPO=org/repo --title 'PR {{PR}}' \\
+    --items 123 124 125
+
   agent-batch 'Review {{PR_URL}}; write the findings to reviews/{{PR}}-{{AGENT}}.md' \\
     --agent claude --title 'PR {{PR}} ({{AGENT}})' \\
     --item PR=123 PR_URL=https://github.com/org/repo/pull/123 \\
@@ -195,6 +198,8 @@ def parser():
 
 Each --item starts one run. Keys are case-insensitive.
 --var sets values shared by all items; an item's own value takes precedence.
+--items VALUE... starts one run per value, for the only key in the prompt, --title,
+and --session-name without a --var value; with more or fewer keys, use --item.
 TITLE names the window/pane and can also appear in the template.
 Without TITLE, --title is used; without both, names are PREFIX-1, PREFIX-2, etc.
 SESSION_NAME (or --session-name) names the agent session; Codex does not support it.
@@ -235,6 +240,8 @@ in another directory.
     cli.add_argument("--list-agents", action="store_true", help="list instances, types, and commands")
     cli.add_argument("--item", action="append", nargs="+", metavar="KEY=VALUE",
                      help="variables for one run; repeat for each item")
+    cli.add_argument("--items", action="extend", nargs="+", metavar="VALUE",
+                     help="one run per value, for the only key without a --var value")
     cli.add_argument("--var", action="extend", nargs="+", metavar="KEY=VALUE",
                      help="variables shared by all items; an item's value takes precedence")
     cli.add_argument("--path", default=".", metavar="DIRECTORY",
@@ -364,6 +371,24 @@ def prepare_item(cli, args, agents, template, shared, assignments, number):
     return title, agent, session_name, prompt, directory
 
 
+def value_items(cli, args, template, shared):
+    # --items fills the only key left without a value, so it never guesses.
+    keys = [key for key in placeholder_keys(template, args, {}) if key not in shared]
+    if not keys:
+        cli.error("--items: the prompt, --title, and --session-name have no key without "
+                  "a --var value for the values to fill")
+    if len(keys) > 1:
+        cli.error(f"--items fills only one key, but {len(keys)} keys have no --var value: "
+                  f"{', '.join(keys)}; set all but one with --var, or use --item KEY=VALUE")
+    key = keys[0]
+    for value in args.items:
+        # --item and --items are one letter apart; catch KEY=VALUE given to --items.
+        if value.upper().startswith(f"{key}="):
+            cli.error(f"--items takes bare values for {key}, got {value!r}; "
+                      "for KEY=VALUE, use --item")
+    return [[f"{key}={value}"] for value in args.items]
+
+
 def prepare(cli, args, agents, template=None):
     if (args.prompt is None) == (args.template is None):
         cli.error("provide a prompt OR --template FILE")
@@ -371,8 +396,13 @@ def prepare(cli, args, agents, template=None):
         template = read_template(cli, args)
     directory = working_directory(cli, args)
     shared = shared_values(cli, args)
+    items = args.item or [[]]
+    if args.items is not None:
+        if args.item:
+            cli.error("--items cannot be combined with --item")
+        items = value_items(cli, args, template, shared)
     jobs = [prepare_item(cli, args, agents, template, shared, assignments, number)
-            for number, assignments in enumerate(args.item or [[]], 1)]
+            for number, assignments in enumerate(items, 1)]
     return directory, jobs
 
 
@@ -488,8 +518,8 @@ def placeholder_keys(template, args, values):
 
 
 def interactive_batch(cli, args, agents):
-    if args.item:
-        cli.error("--item cannot be combined with interactive mode")
+    if args.item or args.items:
+        cli.error("--item and --items cannot be combined with interactive mode")
     if args.prompt is not None and args.template is not None:
         cli.error("provide a prompt OR --template FILE")
     directory = working_directory(cli, args)
@@ -703,7 +733,8 @@ def main():
     spec = agents[args.agent]
     check_backend(cli, args)
     interactive = (args.interactive or (args.prompt is None and args.template is None
-                                       and args.item is None and sys.stdin.isatty()))
+                                       and args.item is None and args.items is None
+                                       and sys.stdin.isatty()))
     if interactive:
         if not sys.stdin.isatty():
             cli.error("interactive mode requires a terminal")

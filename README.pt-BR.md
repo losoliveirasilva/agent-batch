@@ -24,7 +24,7 @@ agent-batch 'Revise {{PR_URL}} considerando {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `AGENT` executa um item com outra instância de IA (veja [Agente por item](#agente-por-item)), e `PATH` o executa em outro diretório (veja [Diretório por item](#diretório-por-item)). `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs. `--var` define valores compartilhados por todos os itens (veja [Variáveis compartilhadas](#variáveis-compartilhadas)).
+Cada `--item` define uma execução. As chaves ignoram maiúsculas/minúsculas. `TITLE` nomeia a janela/painel; sem ele, os nomes são `task-1`, `task-2` etc. Use `--prefix` para mudar esse prefixo. `AGENT` executa um item com outra instância de IA (veja [Agente por item](#agente-por-item)), e `PATH` o executa em outro diretório (veja [Diretório por item](#diretório-por-item)). `--template arquivo.txt` substitui o prompt passado como texto. `--dry-run` mostra os prompts sem iniciar as IAs. `--var` define valores compartilhados por todos os itens (veja [Variáveis compartilhadas](#variáveis-compartilhadas)), e `--items` lista valores soltos quando só uma chave varia (veja [Um valor por item](#um-valor-por-item)).
 
 ### Variáveis compartilhadas
 
@@ -38,6 +38,18 @@ agent-batch 'Revise {{PR_URL}} em {{REPO}} considerando {{TYPE}}' \
 ```
 
 Os dois itens usam `REPO=org/repo`; o primeiro usa `TYPE=backend`, e o segundo o substitui por `frontend`. Os valores compartilhados também preenchem `{{CHAVE}}` em `--title` e `--session-name` e são literais, como os valores de item. Liste vários pares após `--var` ou repita a opção. Assim como `--item`, ela consome todos os argumentos seguintes; por isso, escreva o prompt antes dela. `AGENT`, `PATH`, `TITLE` e `SESSION_NAME` não podem ser compartilhados; use `--agent`, `--path`, `--title` e `--session-name`. Sem `--item`, o prompt roda uma vez com os valores compartilhados.
+
+### Um valor por item
+
+Quando só uma chave muda entre os itens, `--items` recebe os valores soltos, em vez de repetir `--item CHAVE=VALOR`:
+
+```sh
+agent-batch --template review-pr.md --title 'PR {{PR}}' \
+  --var REPO=org/repo \
+  --items 123 124 125
+```
+
+Isso equivale a `--item PR=123 --item PR=124 --item PR=125`. A chave é a única do prompt, de `--title` e de `--session-name` sem valor em `--var`; `{{AGENT}}` nunca conta. Se não sobrar nenhuma chave ou sobrar mais de uma, nada é iniciado e o erro lista as chaves: defina todas menos uma com `--var` ou use `--item`. Os valores são literais e podem conter `=`, mas um valor que começa com a própria chave (`PR=123`) é rejeitado, por provavelmente ser um `--item` digitado errado. `--items` não pode ser combinado com `--item` nem com o modo interativo. Assim como `--item`, a opção consome todos os argumentos seguintes; por isso, escreva o prompt antes dela.
 
 ### Modo interativo e histórico
 

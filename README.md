@@ -24,7 +24,7 @@ agent-batch 'Review {{PR_URL}} with a focus on {{TYPE}}' \
   --item PR_URL=https://github.com/org/repo/pull/124 TYPE=frontend
 ```
 
-Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `AGENT` runs one item with another agent instance (see [Agent per item](#agent-per-item)), and `PATH` runs it in another directory (see [Directory per item](#directory-per-item)). `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents. `--var` sets values shared by every item (see [Shared variables](#shared-variables)).
+Each `--item` defines one run. Variable names are case-insensitive. `TITLE` names the window or pane; otherwise, names default to `task-1`, `task-2`, and so on. Use `--prefix` to change that prefix. `AGENT` runs one item with another agent instance (see [Agent per item](#agent-per-item)), and `PATH` runs it in another directory (see [Directory per item](#directory-per-item)). `--template file.txt` replaces the inline prompt. `--dry-run` previews the prompts without starting the agents. `--var` sets values shared by every item (see [Shared variables](#shared-variables)), and `--items` lists bare values when only one key varies (see [One value per item](#one-value-per-item)).
 
 ### Shared variables
 
@@ -38,6 +38,18 @@ agent-batch 'Review {{PR_URL}} in {{REPO}} with a focus on {{TYPE}}' \
 ```
 
 Both items use `REPO=org/repo`; the first uses `TYPE=backend`, and the second overrides it with `frontend`. Shared values also fill `{{KEY}}` in `--title` and `--session-name`, and are literal like item values. List several pairs after `--var` or repeat it. Like `--item`, it takes every following argument, so write the prompt before it. `AGENT`, `PATH`, `TITLE`, and `SESSION_NAME` cannot be shared; use `--agent`, `--path`, `--title`, and `--session-name`. Without `--item`, the prompt runs once with the shared values.
+
+### One value per item
+
+When only one key changes between items, `--items` takes its bare values instead of repeating `--item KEY=VALUE`:
+
+```sh
+agent-batch --template review-pr.md --title 'PR {{PR}}' \
+  --var REPO=org/repo \
+  --items 123 124 125
+```
+
+This is the same as `--item PR=123 --item PR=124 --item PR=125`. The key is the only one in the prompt, `--title`, and `--session-name` without a `--var` value; `{{AGENT}}` never counts. If no key or more than one key is left, nothing starts and the error lists them: set all but one with `--var`, or use `--item`. Values are literal and may contain `=`, but a value that starts with the key itself (`PR=123`) is rejected as a likely `--item` typo. `--items` cannot be combined with `--item` or interactive mode. Like `--item`, it takes every following argument, so write the prompt before it.
 
 ### Interactive mode and prompt history
 

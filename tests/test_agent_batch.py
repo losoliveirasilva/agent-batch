@@ -220,6 +220,21 @@ class TemplateTests(unittest.TestCase):
         _, jobs = self.prepare("{{REPO}}", "--var", "REPO=org/app")
         self.assertEqual(jobs, [("task-1", "claude", None, "org/app", CWD)])
 
+    def test_items_fill_the_only_key_without_shared_value(self):
+        _, jobs = self.prepare("Review PR {{PR}} in {{REPO}}", "--var", "REPO=org/app",
+                               "--title", "PR {{pr}}", "--items", "1", "2=x", "--items", "{{REPO}}")
+        self.assertEqual(jobs, [("PR 1", "claude", None, "Review PR 1 in org/app", CWD),
+                                ("PR 2=x", "claude", None, "Review PR 2=x in org/app", CWD),
+                                ("PR {{REPO}}", "claude", None,
+                                 "Review PR {{REPO}} in org/app", CWD)])
+        _, jobs = self.prepare("notes-{{AGENT}}.md", "--title", "{{N}}", "--items", "a")
+        self.assertEqual(jobs, [("a", "claude", None, "notes-claude.md", CWD)])
+        result = subprocess.run([str(SCRIPT), "{{PR}} {{REPO}} {{TYPE}}", "--dry-run",
+                                 "--var", "TYPE=api", "--items", "1"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("2 keys have no --var value: PR, REPO", result.stderr)
+
     def test_item_path_overrides_batch_path_relative_to_it(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, HOME=temp):
             root = Path(temp).resolve()
@@ -277,6 +292,12 @@ class TemplateTests(unittest.TestCase):
             ("hello", "--var", "title=shared"),
             ("hello", "--var", "SESSION_NAME=shared"),
             ("hello", "--var", "PATH=."),
+            ("{{PR}} {{REPO}}", "--items", "1"),
+            ("hello", "--items", "1"),
+            ("{{REPO}}", "--var", "REPO=x", "--items", "1"),
+            ("{{PR}}", "--items", "1", "pr=2"),
+            ("{{PR}}", "--items", "1", "--item", "PR=2"),
+            ("{{PATH}}", "--items", ".", "a-directory-that-does-not-exist"),
             ("hello", "--item", "PATH="),
             ("hello", "--item", "PATH=a-directory-that-does-not-exist"),
             ("hello", "--item", f"PATH={SCRIPT}"),
@@ -434,6 +455,10 @@ class InteractiveTests(unittest.TestCase):
                                 input="", capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("requires a terminal", result.stderr)
+        args = MODULE["parser"]().parse_args(["-i", "{{PR}}", "--items", "1"])
+        args.agent = "claude"
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            MODULE["interactive_batch"](MODULE["parser"](), args, AGENTS)
 
     def test_no_argument_terminal_flow_starts_interactive_mode(self):
         class Terminal(io.StringIO):
